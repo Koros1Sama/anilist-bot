@@ -4,7 +4,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler
 from anilist_api import (
     search_media, search_media_candidates, get_user_media_entry, 
-    save_user_media_entry, search_character, recommend_anime_by_genre
+    save_user_media_entry, toggle_favourite_anime, search_character, recommend_anime_by_genre
 )
 from gemini_parser import parse_with_gemini
 
@@ -44,8 +44,8 @@ class handler(BaseHTTPRequestHandler):
                         "<b>المميزات:</b>\n"
                         "1️⃣ <b>تتبع الأنمي والمانجا:</b>\n"
                         "• <i>شفت حلقتين من انمي اللعنات</i>\n"
-                        "• <i>قريت 5 فصول من Solo Leveling</i>\n"
-                        "• <i>خلصت هجوم العمالقة وقيمته 10</i>\n\n"
+                        "• <i>شفت انمي راجنا واقيمه 10 واعمله مفضلة</i>\n"
+                        "• <i>قريت 5 فصول من Solo Leveling</i>\n\n"
                         "2️⃣ <b>البحث عن الشخصيات:</b>\n"
                         "• <i>مين شخصية لوفاي؟</i>\n\n"
                         "3️⃣ <b>اقتراحات الأنميات:</b>\n"
@@ -108,6 +108,7 @@ class handler(BaseHTTPRequestHandler):
                             media_id = media['id']
                             status = parsed.get('status') or 'COMPLETED'
                             score = parsed.get('score')
+                            is_fav = parsed.get('is_favorite', False)
                             
                             current_entry = get_user_media_entry(media_id, ANILIST_TOKEN) if ANILIST_TOKEN else None
                             current_progress = current_entry.get('progress', 0) if current_entry else 0
@@ -122,11 +123,22 @@ class handler(BaseHTTPRequestHandler):
 
                             if ANILIST_TOKEN:
                                 save_user_media_entry(media_id, ANILIST_TOKEN, status=status, score=score, progress=new_progress)
+                                if is_fav:
+                                    try:
+                                        toggle_favourite_anime(media_id, ANILIST_TOKEN)
+                                    except Exception as e:
+                                        print("Favorite toggle error:", e)
+
                                 reply = f"✅ <b>تم التحديث في AniList بنجاح!</b>\n\n📺 <b>الـ {media_type}:</b> {title_display}\n📌 <b>الحالة:</b> {status}\n🔢 <b>{unit_label}:</b> {new_progress}"
                                 if score is not None:
                                     reply += f"\n⭐ <b>التقييم:</b> {score}/10"
+                                if is_fav:
+                                    reply += f"\n❤️ <b>تمت إضافته إلى المفضلة!</b>"
                             else:
-                                reply = f"🔍 <b>تم العثور على الـ {media_type}:</b> {title_display}\n📌 <b>الحالة المفترضة:</b> {status}\n🔢 <b>{unit_label}:</b> {new_progress}\n⭐ <b>التقييم:</b> {score or 'غير محدد'}\n\n⚠️ <i>ملاحظة: يرجى إضافة ANILIST_ACCESS_TOKEN.</i>"
+                                reply = f"🔍 <b>تم العثور على الـ {media_type}:</b> {title_display}\n📌 <b>الحالة المفترضة:</b> {status}\n🔢 <b>{unit_label}:</b> {new_progress}\n⭐ <b>التقييم:</b> {score or 'غير محدد'}\n"
+                                if is_fav:
+                                    reply += "❤️ <b>الحالة: مفضلة</b>\n"
+                                reply += "\n⚠️ <i>ملاحظة: يرجى إضافة ANILIST_ACCESS_TOKEN ليتم التحديث الفعلي.</i>"
                             
                             send_telegram_message(chat_id, reply)
 
