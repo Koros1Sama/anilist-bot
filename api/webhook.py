@@ -1,5 +1,5 @@
 """
-AniList Telegram Bot v2.0 - Vercel Serverless Webhook
+AniList Telegram Bot v2.1 - Vercel Serverless Webhook
 All modules combined into a single file for reliable Vercel deployment.
 Features: 30+ actions, cover images, albums, inline keyboards, conversation memory, Gemini AI.
 """
@@ -15,8 +15,8 @@ from http.server import BaseHTTPRequestHandler
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 ANILIST_TOKEN = os.environ.get("ANILIST_ACCESS_TOKEN")
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyC-sxn3K3wlunZ6WtCBbCAelrdLf8yowgI")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 ANILIST_URL = "https://graphql.anilist.co"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AniListBot/2.0"
 
@@ -371,7 +371,7 @@ CRITICAL RULES:
 - NEVER set dates unless user explicitly mentions them
 - If user says 'ه'/'ها'/'هذا' without title, set title to null (system resolves from context)
 - You MUST identify anime titles even if user uses Arabic names, descriptions, or nicknames
-- If user describes an anime by plot/characters, try to identify it and set title
+- If user describes an anime by plot/characters (e.g. 'أنمي البطل يتحكم بالناس وياخذ قدراتهم'), locate the exact anime title (e.g. 'Charlotte') and set title!
 - For conversational messages not about anime, use action=CHAT with chat_response in Arabic
 
 Return ONLY valid JSON:
@@ -398,29 +398,41 @@ def parse_with_gemini(text, chat_id=None):
         result["_parser"] = "regex_no_key"
         return result
     context = build_gemini_context(chat_id) if chat_id else ""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={key}"
-    payload = {
-        "contents": [{"parts": [{"text": f"Context:\n{context}\n\nUser message: {text}"}]}],
-        "systemInstruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
-        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.1},
-    }
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    try:
-        print(f"[Gemini] Calling {GEMINI_MODEL}...")
-        with urllib.request.urlopen(req, timeout=9) as resp:
-            res = json.loads(resp.read().decode("utf-8"))
-            content = res["candidates"][0]["content"]["parts"][0]["text"]
-            parsed = json.loads(content)
-            parsed["original_text"] = text
-            parsed["_parser"] = "gemini"
-            print(f"[Gemini] OK: action={parsed.get('action')}, title={parsed.get('title')}")
-            return parsed
-    except Exception as e:
-        print(f"[Gemini] FAIL: {type(e).__name__}: {e}")
-        result = regex_parse(text)
-        result["_parser"] = f"regex_fallback:{type(e).__name__}"
-        return result
+    models_to_try = [GEMINI_MODEL, "gemini-2.5-flash", "gemini-2.0-flash-lite"]
+    seen = set()
+    models = [m for m in models_to_try if not (m in seen or seen.add(m))]
+    last_error = None
+    for model_name in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
+        payload = {
+            "contents": [{"parts": [{"text": f"Context:\n{context}\n\nUser message: {text}"}]}],
+            "systemInstruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
+            "generationConfig": {"responseMimeType": "application/json", "temperature": 0.1},
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+        try:
+            print(f"[Gemini] Trying {model_name}...")
+            with urllib.request.urlopen(req, timeout=9) as resp:
+                res = json.loads(resp.read().decode("utf-8"))
+                content = res["candidates"][0]["content"]["parts"][0]["text"]
+                parsed = json.loads(content)
+                parsed["original_text"] = text
+                parsed["_parser"] = f"gemini:{model_name}"
+                print(f"[Gemini] Success ({model_name}): action={parsed.get('action')}, title={parsed.get('title')}")
+                return parsed
+        except urllib.error.HTTPError as e:
+            err_msg = e.read().decode("utf-8") if e.fp else str(e)
+            print(f"[Gemini] {model_name} HTTP {e.code}: {err_msg[:150]}")
+            last_error = f"HTTP {e.code}"
+            if e.code == 429: continue
+        except Exception as e:
+            print(f"[Gemini] {model_name} FAILED: {type(e).__name__}: {e}")
+            last_error = f"{type(e).__name__}: {e}"
+
+    result = regex_parse(text)
+    result["_parser"] = f"regex_fallback:{last_error}"
+    return result
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -433,7 +445,7 @@ class handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(result, indent=2, ensure_ascii=False).encode("utf-8"))
             return
-        status = {"status": "running", "bot": "AniList Bot v2.1",
+        status = {"status": "running", "bot": "AniList Bot v2.2",
                   "telegram": "SET" if TELEGRAM_TOKEN else "MISSING",
                   "anilist": "SET" if ANILIST_TOKEN else "MISSING",
                   "gemini": "SET" if GEMINI_KEY else "MISSING",
@@ -445,18 +457,16 @@ class handler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(status, indent=2).encode("utf-8"))
 
     def _test_gemini(self):
-        if not GEMINI_KEY:
-            return {"error": "GEMINI_API_KEY not set"}
+        if not GEMINI_KEY: return {"error": "GEMINI_API_KEY not set"}
         test_text = "\u0643\u0645\u0644\u062a \u0627\u0646\u0645\u064a \u0648\u0646 \u0628\u064a\u0633"
         try:
             t0 = time.time()
             result = parse_with_gemini(test_text)
             elapsed = round(time.time() - t0, 2)
-            return {"gemini_works": result.get("_parser") == "gemini", "parser": result.get("_parser"),
+            return {"gemini_works": "gemini" in result.get("_parser", ""), "parser": result.get("_parser"),
                     "seconds": elapsed, "action": result.get("action"), "title": result.get("title"),
                     "key_prefix": GEMINI_KEY[:6] + "...", "model": GEMINI_MODEL}
-        except Exception as e:
-            return {"error": str(e)}
+        except Exception as e: return {"error": str(e)}
 
     def do_POST(self):
         try:
@@ -872,7 +882,7 @@ class handler(BaseHTTPRequestHandler):
 
     def _welcome(self, cid):
         clear_context(cid)
-        tg_send(cid, "\ud83c\udfac <b>AniList Bot v2.1</b>\n\n\u0623\u0646\u0627 \u0645\u0633\u0627\u0639\u062f\u0643 \u0627\u0644\u0630\u0643\u064a \u0644\u0625\u062f\u0627\u0631\u0629 \u0627\u0644\u0623\u0646\u0645\u064a. \u0643\u0644\u0645\u0646\u064a \u0628\u0627\u0644\u0639\u0631\u0628\u064a!\n\n/help \u0644\u0644\u062f\u0644\u064a\u0644 \ud83d\udcd6")
+        tg_send(cid, "\ud83c\udfac <b>AniList Bot v2.2</b>\n\n\u0623\u0646\u0627 \u0645\u0633\u0627\u0639\u062f\u0643 \u0627\u0644\u0630\u0643\u064a \u0644\u0625\u062f\u0627\u0631\u0629 \u0627\u0644\u0623\u0646\u0645\u064a. \u0643\u0644\u0645\u0646\u064a \u0628\u0627\u0644\u0639\u0631\u0628\u064a!\n\n/help \u0644\u0644\u062f\u0644\u064a\u0644 \ud83d\udcd6")
 
     def _help(self, cid):
         tg_send(cid, """\ud83d\udcd6 <b>\u0627\u0644\u062f\u0644\u064a\u0644</b>\n\n<b>\u062a\u062a\u0628\u0639:</b> \u0643\u0645\u0644\u062a X \u0648\u0627\u0642\u064a\u0645\u0647 9\n<b>\u062d\u0630\u0641:</b> \u0627\u062d\u0630\u0641 X\n<b>\u0625\u062d\u0635\u0627\u0626\u064a\u0627\u062a:</b> \u0625\u062d\u0635\u0627\u0626\u064a\u0627\u062a\u064a / \u0625\u062d\u0635\u0627\u0626\u064a\u0627\u062a Ahmed\n<b>\u0646\u0634\u0627\u0637\u0627\u062a:</b> \u0622\u062e\u0631 \u0646\u0634\u0627\u0637\u0627\u062a\u064a\n<b>\u0623\u0635\u062f\u0642\u0627\u0621:</b> \u0627\u0635\u062f\u0642\u0627\u0626\u064a / \u0628\u0631\u0648\u0641\u0627\u064a\u0644 Ahmed / \u0642\u0627\u0631\u0646 \u0645\u0639 Ahmed\n<b>\u062a\u0648\u0635\u064a\u0627\u062a:</b> \u0645\u0634\u0627\u0628\u0647 \u0644X / \u0627\u0642\u062a\u0631\u062d \u0623\u0643\u0634\u0646\n<b>\u062a\u0631\u0646\u062f:</b> \u0648\u0634 \u0627\u0644\u062a\u0631\u0646\u062f / \u0627\u0646\u0645\u064a\u0627\u062a \u0627\u0644\u0645\u0648\u0633\u0645\n<b>\u0628\u062d\u062b:</b> \u0634\u062e\u0635\u064a\u0629 X / \u0627\u0633\u062a\u062f\u064a\u0648 MAPPA / \u0645\u062a\u0649 \u0627\u0644\u062d\u0644\u0642\u0629 \u0627\u0644\u062c\u0627\u064a\u0629\n<b>\u0645\u0631\u062d:</b> \u0641\u0627\u062c\u0626\u0646\u064a! / \u0623\u062e\u0628\u0627\u0631\n\n\ud83e\udde0 \u0643\u0644\u0645\u0646\u064a \u0637\u0628\u064a\u0639\u064a \u0648\u0628\u0641\u0647\u0645\u0643!""")
