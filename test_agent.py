@@ -13,6 +13,7 @@ spec.loader.exec_module(wb)
 wb.KV_ENABLED = False
 wb.GEMINI_KEY = "dummy-key"
 wb.ANILIST_TOKEN = None  # so _viewer_me() short-circuits without network
+REAL_GQL = wb._gql  # capture real _gql before section A mocks it
 
 failures = []
 
@@ -205,22 +206,30 @@ wb.GEMINI_KEY = ""
 ok3 = wb.run_agent("999", "x")
 check(ok3 is False, "run_agent returns False when GEMINI_KEY missing")
 
-print("\n=== [E] OUTAGE INJECTION (AniList down -> agent told up-front, replies gracefully) ===")
-sent.clear()
-wb.GEMINI_KEY = "dummy-key"
-wb.ANILIST_TOKEN = "dummy"  # so _resolve_me_and_state proceeds to the probe
-wb._resolve_me_and_state = lambda: (None, "down")
-injected = {"v": False}
-def fake_gen_down(contents):
-    blob = json.dumps(contents, ensure_ascii=False)
-    if "AniList API متعطّلة" in blob:
-        injected["v"] = True
-    return {"candidates": [{"content": {"parts": [{"text": "AniList متعطّلة شوي، جرّب بعد دقايق 🙏"}]}}]}
-wb._gemini_generate = fake_gen_down
-ok = wb.run_agent("777", "هات قائمة اصدقائي")
-check(ok is True, "run_agent returned True during outage (reply sent)")
-check(injected["v"], "outage note injected into Gemini contents (agent told AniList is down)")
-check(any("متعطّلة" in t[1] for t in sent), "agent replied with the graceful outage message")
+print("\n=== [E] _gql RETRY on AniList disable-403 (shared-IP rate limit) ===")
+wb._gql = REAL_GQL  # restore real _gql (section A had mocked it)
+calls = {"n": 0}
+disabled_body = json.dumps({"errors": [{"message": "The AniList API has been temporarily disabled due to severe stability issues.", "status": 403}]}).encode()
+ok_body = json.dumps({"data": {"Viewer": {"id": 748233, "name": "Koros1Sama"}}}).encode()
+class _FR:
+    def __init__(self, b): self._b = b
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def read(self): return self._b
+def _fake_urlopen(req, timeout=None):
+    calls["n"] += 1
+    return _FR(disabled_body if calls["n"] == 1 else ok_body)
+_orig_sleep = wb.time.sleep
+_orig_urlopen = wb.urllib.request.urlopen
+wb.time.sleep = lambda s: None
+wb.urllib.request.urlopen = _fake_urlopen
+try:
+    res = wb._gql("query{Viewer{id name}}")
+finally:
+    wb.time.sleep = _orig_sleep
+    wb.urllib.request.urlopen = _orig_urlopen
+check(calls["n"] == 2, f"_gql retried once after disable-403 (urlopen calls={calls['n']})")
+check(not wb._gql_errors(res), "_gql returned the successful retry response, not the 403")
 
 print("\n" + ("=" * 50))
 if failures:

@@ -242,17 +242,27 @@ def _gql(query, variables=None, token=None, timeout=None):
     if token:
         headers["Authorization"] = f"Bearer {token}"
     data = json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
-    req = urllib.request.Request(ANILIST_URL, data=data, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout or HTTP_TIMEOUT) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
+    # AniList rate-limits shared cloud IPs (e.g. Vercel) with a 'temporarily disabled'
+    # 403 after a couple of calls. That window is short, so retry once after a brief
+    # backoff instead of failing straight away — this fixes 'some commands fail'.
+    last_res = None
+    for attempt in range(2):
+        req = urllib.request.Request(ANILIST_URL, data=data, headers=headers)
         try:
-            return json.loads(e.read().decode("utf-8"))
-        except Exception:
-            return {"errors": [{"message": f"HTTP {e.code}"}]}
-    except Exception as e:
-        return {"errors": [{"message": str(e)}]}
+            with urllib.request.urlopen(req, timeout=timeout or HTTP_TIMEOUT) as resp:
+                last_res = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            try:
+                last_res = json.loads(e.read().decode("utf-8"))
+            except Exception:
+                last_res = {"errors": [{"message": f"HTTP {e.code}"}]}
+        except Exception as e:
+            last_res = {"errors": [{"message": str(e)}]}
+        if not _looks_disabled(_gql_errors(last_res)):
+            return last_res
+        if attempt == 0:
+            time.sleep(1.3)
+    return last_res
 
 
 def search_media(title, media_type="ANIME", per_page=5):
@@ -1125,6 +1135,7 @@ AGENT_SYSTEM_PROMPT = """أنت «المخلافي»، مساعد ذكي وخب�
 
 # الأسلوب
 - ردودك النهائية قصيرة وطبيعية. لا تشرح آلية الأدوات للمستخدم ولا تذكر أسماء الدوال.
+- استدعِ فقط الأداة/الأدوات الضرورية مباشرةً للطلب (مثلاً «إحصائياتي» = get_my_stats فقط؛ «احذف X» = search_my_list ثم delete_entry)، بدون أدوات إضافية غير لازمة — كل استدعائ زي يزيد احتمال رفض AniList.
 - إذا كلمّك المستخدم بدردشة أو رأي بدون الحاجة لأداة، ردّ مباشرة بدون أدوات.
 - التأكيدات («نعم/لا/أكيد») تُفهم من سياق المحادثة السابق — لا حاجة لقواعد صلبة."""
 
@@ -1210,7 +1221,7 @@ def _tool_search_my_list(cid, args, me):
         return {"error": "حساب AniList غير مربوط (ANILIST_ACCESS_TOKEN ناقص)"}
     results = []
     err = None
-    for pg in (1, 2, 3):
+    for pg in (1, 2):
         res = _gql(
             """query($un:String,$t:MediaType,$p:Int,$n:Int){Page(page:$p,perPage:$n){mediaList(userName:$un,type:$t){
             id status score progress media{id title{romaji english native} episodes chapters seasonYear
@@ -2103,24 +2114,10 @@ def run_agent(cid, text):
     """Run the multi-step Gemini agent. Returns True if a reply was sent, False on failure (caller falls back)."""
     if not GEMINI_KEY:
         return False
-    me, astate = _resolve_me_and_state()
+    me = _viewer_me()
     contents = _build_contents(cid)
     if not contents:
         contents = [{"role": "user", "parts": [{"text": text}]}]
-    # If AniList is globally down, tell the agent up-front so it replies gracefully
-    # (consistently "AniList متعطّلة") instead of tools reporting misleading "not found"/"empty".
-    if astate == "down":
-        contents.append(
-            {
-                "role": "user",
-                "parts": [
-                    {
-                        "text": "[ملاحظة نظام: AniList API متعطّلة حالياً (HTTP 403). كل أدوات AniList ستفشل. لا تستدعِ أدوات — ردّ على المستخدم بأن AniList متعطّلة شوي ويجرّب بعد دقايق.]"
-                    }
-                ],
-            }
-        )
-        contents.append({"role": "model", "parts": [{"text": "تمام، AniList متعطّلة."}]})
 
     for _step in range(MAX_STEPS):
         resp = _gemini_generate(contents)
