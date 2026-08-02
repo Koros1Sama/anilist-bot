@@ -339,18 +339,18 @@ def get_activities(user_id, page=1, per_page=8, token=None):
     return sget(res, "data", "Page", "activities", default=[]) or []
 
 
-def get_stats(username):
+def get_stats(username, token=None):
     q = """query($n:String){User(name:$n){statistics{anime{count meanScore minutesWatched
     episodesWatched chaptersRead genres(limit:5,sort:COUNT_DESC){genre count meanScore}
     studios(limit:3,sort:COUNT_DESC){studio{name}count}} manga{count meanScore chaptersRead}}}}"""
-    res = _gql(q, {"n": username})
+    res = _gql(q, {"n": username}, token=token or ANILIST_TOKEN)
     return sget(res, "data", "User", "statistics")
 
 
-def get_profile(username):
+def get_profile(username, token=None):
     q = """query($n:String){User(name:$n){id name about avatar{large} bannerImage siteUrl
     statistics{anime{count meanScore episodesWatched} manga{count meanScore chaptersRead}}}}"""
-    res = _gql(q, {"n": username})
+    res = _gql(q, {"n": username}, token=token or ANILIST_TOKEN)
     return sget(res, "data", "User")
 
 
@@ -419,10 +419,10 @@ def get_relations(media_id, timeout=None):
     return sget(res, "data", "Media", "relations", "edges", default=[]) or []
 
 
-def get_favorites(username):
+def get_favorites(username, token=None):
     q = """query($n:String){User(name:$n){favourites{anime{nodes{id title{romaji english}
     coverImage{large} siteUrl}} manga{nodes{id title{romaji english} coverImage{large}}}}}}"""
-    res = _gql(q, {"n": username})
+    res = _gql(q, {"n": username}, token=token or ANILIST_TOKEN)
     fav = sget(res, "data", "User", "favourites", default={}) or {}
     return (
         sget(fav, "anime", "nodes", default=[]) or [],
@@ -2227,20 +2227,14 @@ class handler(BaseHTTPRequestHandler):
             out["resolve_state"] = astate
         except Exception as e:
             out["resolve_exception"] = f"{type(e).__name__}: {e}"
-        # diagnostic variants for the failing statistics query (heavy vs light + retry)
+        # unauthenticated stats (cloud IP -> 403) vs authenticated via get_stats (token)
         try:
-            full_q = "query($n:String){User(name:$n){statistics{anime{count meanScore minutesWatched episodesWatched genres(limit:5,sort:COUNT_DESC){genre} studios(limit:3,sort:COUNT_DESC){studio{name}}} manga{count}}}}"
-            light_q = "query($n:String){User(name:$n){statistics{anime{count meanScore minutesWatched episodesWatched} manga{count chaptersRead}}}}"
-            results = []
-            for _i in range(3):
-                r = _gql(full_q, {"n": "Koros1Sama"})
-                results.append("ok" if sget(r, "data", "User", "statistics") else str((r.get("errors") or [{}])[0].get("status", "err")))
-            out["full_stats_3x"] = results
-            lr = _gql(light_q, {"n": "Koros1Sama"})
-            out["light_stats_ok"] = bool(sget(lr, "data", "User", "statistics"))
-            out["light_stats_err"] = lr.get("errors")
+            unauth = _gql("query($n:String){User(name:$n){statistics{anime{count}}}}", {"n": "Koros1Sama"})
+            out["unauth_stats_ok"] = bool(sget(unauth, "data", "User", "statistics"))
+            out["unauth_stats_err_status"] = str((unauth.get("errors") or [{}])[0].get("status", ""))
+            out["auth_stats_ok"] = bool(get_stats("Koros1Sama"))  # uses token=ANILIST_TOKEN
         except Exception as e:
-            out["stats_variants_exception"] = f"{type(e).__name__}: {e}"
+            out["stats_diag_exception"] = f"{type(e).__name__}: {e}"
         out["elapsed_seconds"] = round(time.time() - t0, 2)
         return out
 
