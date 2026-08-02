@@ -1095,128 +1095,1067 @@ def _extract_corrected_progress(text):
 
 
 # ============================================================
-# [8] GEMINI AI PARSER
+
 # ============================================================
-GEMINI_SYSTEM_PROMPT = """أنت مساعد خبير لأنمي/مانجا AniList اسمه «المخلافي». تفهم العربية العامية والفصحى والإنجليزية والأرابيزي والأخطاء الإملائية وأوصاف الحبكة والشخصيات.
+# [8] GEMINI FUNCTION-CALLING AGENT (v4.0)
+# ============================================================
+# Replaces the old single-shot "parse intent -> route" flow.
+# Gemini now drives a multi-step loop: it calls tools (functionDeclarations)
+# to search, mutate and render, and we feed each tool result back until it
+# emits a final natural-language reply. Pure-stdlib (urllib), single file.
 
-قواعد الحالة (STATUS):
-- 'كملت'/'أكملت'/'خلصت'/'شفت كامل'/'شفت كل حلقاته'/'انهيت'/'وخلصته' = COMPLETED (وليس CURRENT)
-- 'شفت الأنمي' بدون ذكر عدد حلقات = COMPLETED
-- 'شفت حلقتين من X' أو 'بدأت اشوف X شفت حلقتين' = CURRENT مع absolute_progress=2 (وليس progress_delta!)
-- 'شفت 5 حلقات من X' (بدون كلمة بدأت) = CURRENT مع progress_delta=5
-- 'بدأت/بديت/بدات اشوف X شفت N حلقات' أو 'رجعت اتابع X' أو 'من جديد/من البداية' = CURRENT مع absolute_progress=N (بداية/إعادة، absolute وليس delta). واجعل fresh_start=true.
-- عند COMPLETED ولا يوجد عدد حلقات: اجعل progress_delta و absolute_progress بقيمة null (النظام يملأه تلقائياً حسب إجمالي الحلقات).
-- لا تحدد تواريخ أبداً إلا إذا ذكرها المستخدم صراحة.
-- إذا قال المستخدم 'ه'/'ها'/'هذا'/'ذاك'/'نفسه' دون عنوان، اترك title=null (النظام يحلّه من السياق).
+AGENT_SYSTEM_PROMPT = """أنت «المخلافي»، مساعد ذكي وخبير لأنمي/المانجا من AniList. تتكلم بالعربية (عامية خليجية واضحة أو فصحى مبسطة)، ودود ومختصر. تفهم العامية والأرابيزي والأخطاء الإملائية وأوصاف الحبكة.
 
-الأرقام العربية (انتبه جداً للصيغة المثنى):
-- حلقتين = 2 (اثنان بالضبط، وليس ثلاثة عشر!)
-- ثلاث حلقات = 3، أربع = 4، خمس = 5، ست = 6، سبع = 7، ثمان = 8، تسع = 9، عشر = 10.
+# كيف تشتغل (مهم جداً)
+أنت AGENT عديد الخطوات لديك أدوات (functions). للقيام بأي إجراء حقيقي استدعِ الأداة المناسبة، اقرأ نتيجتها، ثم قرّر الخطوة التالية. لا تخمن أرقام id — اجلبها بالبحث أولاً.
 
-الأجزاء والمواسم:
-- 'الجزء الجديد/الأخير/الأخيرة/الي نزل قريب/الأحدث/الموسم الجديد' → اجعل part_hint = "latest" (النظام يبحث في AniList عن أحدث جزء فعلياً).
-- 'الجزء الرابع'/'الموسم 4' → part_hint = رقم (مثال 4).
-- لا تعتمد على معرفتك بمواسم الأنمي؛ دائماً اتركها كـ part_hint ودع النظام يحلّها من AniList.
+# قواعد الأدوات
+- التتبع (track): استدعِ search_anime لجلب media_id أولاً، ثم track_media. إذا أراد جزءاً/موسماً معيناً («الجديد/الأخير/الرابع») مرّر part="latest" أو رقم.
+- الحذف (delete) — هذا الأهم: ابحث دائماً في قائمة المستخدم نفسه عبر search_my_list (وليس search_anime). خذ entry_id و media_id و title من النتيجة، ثم استدعِ delete_entry. إذا كانت النتيجة أكثر من عنصر أو غير واضحة، اسأل المستخدم بالنص للتأكيد قبل الحذف.
+- المعلومات/العلاقات/الحلقات: استخدم search_anime لتحديد media_id ثم get_relations/get_airing/get_recommendations.
+- الترقيم بالعربي: حلقتين=2، ثلاث=3، أربع=4، خمس=5، ست=6، سبع=7، ثمان=8، تسع=9، عشر=10.
+- «بدأت أشوف X شفت N» = بداية جديدة (fresh_start=true، progress=N). «شفت N حلقات من X» (بدون بدأت) = إضافة (progress_delta=N). «كملت/أنهيت X» = status=COMPLETED.
 
-التصحيحات (مهم جداً):
-- إذا بدأت رسالة المستخدم بـ 'لا'/'لأ' أو احتوت 'كنت اقصد'/'مش'/'مو'/'غلط'/'صحح'/'مو صح'/'غيرت بياناته'، فهي تصحيح لآخر إجراء. اجعل action="CORRECT" وضع: corrected_progress (الرقم المصحح إن وجد)، part_hint (إن كان يصحّح الجزء)، title (العنوان الصحيح أو null ليُؤخذ من السياق).
-- إذا قال 'ليش سجلت 13؟ انا قلت حلقتين' → CORRECT مع corrected_progress=2.
-- إذا قال 'كنت اقصد الرابع' → CORRECT مع part_hint=4.
+# معالجة الأخطاء (مهم)
+- إذا رجعت أي أداة {error: "..."}، لا تقل أبداً «ما لقيت» بشكل آلي. اقرأ نص الخطأ:
+  * إذا كان يدل على تعطّل AniList (403 / disabled / مؤقتاً / متعطّلة) → اعتذر بلطف: «AniList متعطّلة شوي الحين، جرّب بعد دقايق 🙏».
+  * إذا كان «ما لقيت نتائج» → اطلب منه اسم أوضح (بالإنجليزي/الياباني).
+- كن صادقاً: ما تعرفه قل إنك ما تعرفه، ولا تختلق معلومات.
 
-التأكيد والإلغاء:
-- 'نعم/اي/اكيد/صح/تمام/اوك/ok/yes/ايوه/اه' بعد سؤال من البوت = تأكيد الإجراء المعلّق. اجعل action="CHAT" مع chat_response="__CONFIRM__".
-- 'لا/no/الغي/cancel' بعد سؤال = إلغاء. action="CHAT" مع chat_response="__CANCEL__".
-- 'تراجع/ارجع/undo/الغي آخر' = action="UNDO".
+# الأسلوب
+- ردودك النهائية قصيرة وطبيعية. لا تشرح آلية الأدوات للمستخدم ولا تذكر أسماء الدوال.
+- إذا كلمّك المستخدم بدردشة أو رأي بدون الحاجة لأداة، ردّ مباشرة بدون أدوات.
+- التأكيدات («نعم/لا/أكيد») تُفهم من سياق المحادثة السابق — لا حاجة لقواعد صلبة."""
 
-تحديد الأنمي بالحبكة/الوصف: أنت خبير أنمي حقيقي. عند وصف حبكة أو شخصيات أو قدرات، حدد الأنمي.
-أمثلة: 'البطل يتحكم بالناس ويسرق القدرات' = Charlotte، 'عدنان ولينا' = Future Boy Conan، 'تشارلوت' = Charlotte.
-
-أرجع JSON صالحاً فقط بمفاتيح:
-- action: TRACK, DELETE, STATS, ACTIVITY, MY_LIST, FRIEND_PROFILE, FRIEND_LIST, FRIEND_ACTIVITY, COMPARE_FRIEND, RECOMMEND_GENRE, RECOMMEND_SIMILAR, RECOMMEND_FROM_LIST, TRENDING, SEASONAL, TOP_RATED, RANDOM_ANIME, CHARACTER_LOOKUP, STAFF_LOOKUP, STUDIO_LOOKUP, RELATIONS, AIRING_SCHEDULE, FAVORITES_LIST, FAVORITES_ADD, FAVORITES_REMOVE, BATCH_TRACK, SURPRISE, NEWS, CHAT, MY_FOLLOWING, UNDO, CORRECT
-- media_type: ANIME أو MANGA
-- title: العنوان الرسمي (إنجليزي/روماجي) أو null
-- status: COMPLETED, CURRENT, PLANNING, PAUSED, DROPPED, REPEATING أو null
-- score: رقم 0-10 أو null
-- progress_delta: عدد صحيح (حلقات للإضافة) أو null
-- absolute_progress: رقم الحلقة بالضبط (للبدايات الجديدة والتصحيحات) أو null
-- fresh_start: boolean (true عند البداية/الإعادة)
-- part_hint: "latest" أو رقم صحيح أو null
-- corrected_progress: رقم صحيح أو null (للتصحيحات)
-- is_favorite: boolean
-- genre: نص أو null
-- friend_username: اسم مستخدم AniList أو null
-- confidence: high/medium/low
-- alternatives: [] قائمة عناوين بديلة
-- batch: [{title,status,score,progress_delta},...] أو null
-- chat_response: نص عربي (لـ CHAT) أو null"""
+MAX_STEPS = 8
+GEMINI_TIMEOUT = 8
 
 
-def parse_with_gemini(text, chat_id=None):
-    if not GEMINI_KEY:
-        result = regex_parse(text)
-        result["_parser"] = "regex_no_key"
-        return result
-    context = build_gemini_context(chat_id) if chat_id else ""
-    models_to_try = []
-    for m in [
-        GEMINI_MODEL,
-        "gemini-2.0-flash",
-        "gemini-2.5-flash",
-        "gemini-2.0-flash-lite",
-    ]:
-        if m and m not in models_to_try:
-            models_to_try.append(m)
-    last_error = None
-    for model_name in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_KEY}"
-        user_part = (
-            f"السياق:\n{context}\n\nرسالة المستخدم: {text}"
-            if context
-            else f"رسالة المستخدم: {text}"
+def _gql_errors(res):
+    """Return a joined AniList error string, or None if no errors."""
+    if isinstance(res, dict) and res.get("errors"):
+        msgs = [str((e or {}).get("message", "")) for e in res["errors"]]
+        joined = "; ".join(m for m in msgs if m)
+        return joined or "AniList error"
+    return None
+
+
+def _looks_disabled(err):
+    """Heuristic: does this error string indicate AniList is temporarily down/403?"""
+    if not err:
+        return False
+    e = err.lower()
+    return any(
+        k in e
+        for k in (
+            "403",
+            "disabled",
+            "temporarily",
+            "rate",
+            "overload",
+            "unavailable",
+            "5",
         )
-        payload = {
-            "contents": [{"parts": [{"text": user_part}]}],
-            "systemInstruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "temperature": 0.1,
-            },
-        }
-        data = json.dumps(payload).encode("utf-8")
+    ) and "not found" not in e
+
+
+def _viewer_me():
+    if not ANILIST_TOKEN:
+        return None
+    try:
+        return get_viewer(ANILIST_TOKEN)
+    except Exception:
+        return None
+
+
+def _compact_media(m):
+    if not m:
+        return None
+    return {
+        "id": m.get("id"),
+        "title": title_of(m),
+        "year": sget(m, "seasonYear"),
+        "score": sget(m, "averageScore"),
+        "episodes": sget(m, "episodes") or sget(m, "chapters"),
+        "cover_url": cover_of(m),
+        "site_url": sget(m, "siteUrl"),
+    }
+
+
+# ---- search with explicit error surfacing (so we can detect AniList outages) ----
+_SEARCH_MEDIA_Q = """query($s:String,$t:MediaType,$n:Int){Page(perPage:$n){media(search:$s,type:$t){
+id type title{romaji english native} episodes chapters volumes season seasonYear status averageScore
+coverImage{extraLarge large medium color} siteUrl trailer{id site} genres}}}"""
+
+
+def _search_media_e(query, media_type="ANIME", per_page=5):
+    res = _gql(_SEARCH_MEDIA_Q, {"s": query, "t": media_type, "n": per_page})
+    err = _gql_errors(res)
+    if err:
+        return [], err
+    return sget(res, "data", "Page", "media", default=[]) or [], None
+
+
+# ============================================================
+# TOOL IMPLEMENTATIONS — each renders to Telegram and returns a compact dict
+# ============================================================
+def _tool_search_my_list(cid, args, me):
+    q = (args.get("query") or "").strip().lower()
+    mt = args.get("type") or "ANIME"
+    if not me:
+        return {"error": "حساب AniList غير مربوط (ANILIST_ACCESS_TOKEN ناقص)"}
+    results = []
+    err = None
+    for pg in (1, 2, 3):
+        res = _gql(
+            """query($un:String,$t:MediaType,$p:Int,$n:Int){Page(page:$p,perPage:$n){mediaList(userName:$un,type:$t){
+            id status score progress media{id title{romaji english native} episodes chapters seasonYear
+            averageScore coverImage{large} siteUrl}}}}""",
+            {"un": me["name"], "t": mt, "p": pg, "n": 50},
+        )
+        err = _gql_errors(res)
+        if err:
+            break
+        entries = sget(res, "data", "Page", "mediaList", default=[]) or []
+        if not entries:
+            break
+        for e in entries:
+            media = e.get("media") or {}
+            t = (title_of(media) or "").lower()
+            if q in t or t in q:
+                results.append(
+                    {
+                        "entry_id": e.get("id"),
+                        "media_id": media.get("id"),
+                        "title": title_of(media),
+                        "year": sget(media, "seasonYear"),
+                        "status": e.get("status"),
+                        "progress": e.get("progress"),
+                        "score": e.get("score"),
+                    }
+                )
+        if len(entries) < 50:
+            break
+    if err:
+        return {"error": ("AniList متعطّلة مؤقتاً، جرّب بعد دقايق" if _looks_disabled(err) else err)}
+    if not results:
+        return {"error": f"ما لقيت «{args.get('query','')}» في قائمتك. (ممكن يكون مو مسجّل عندك)"}
+    results.sort(
+        key=lambda r: (0 if r["title"].lower().startswith(q) else 1, -(r.get("year") or 0))
+    )
+    return {"count": len(results), "results": results[:15]}
+
+
+def _tool_search_anime(cid, args, me):
+    q = (args.get("query") or "").strip()
+    mt = args.get("type") or "ANIME"
+    n = 5
+    try:
+        n = int(args.get("per_page") or 5)
+    except Exception:
+        n = 5
+    if not q:
+        return {"error": "اكتب اسم الأنمي للبحث"}
+    media_list, err = _search_media_e(q, mt, n)
+    if err:
+        return {"error": ("AniList متعطّلة مؤقتاً، جرّب بعد دقايق" if _looks_disabled(err) else err)}
+    if not media_list:
+        return {"error": f"ما لقيت نتائج لـ {q}. جرّب بالإنجليزي أو الياباني."}
+    return {"count": len(media_list), "results": [_compact_media(m) for m in media_list]}
+
+
+def _tool_get_media_info(cid, args, me):
+    mid = args.get("media_id")
+    if not mid:
+        return {"error": "media_id مطلوب"}
+    media = get_media_by_id(int(mid))
+    if not media:
+        return {"error": "ما لقيت هذا الأنمي"}
+    my = None
+    if ANILIST_TOKEN:
+        ex = get_entry(int(mid), ANILIST_TOKEN)
+        if ex:
+            my = {"status": ex.get("status"), "progress": ex.get("progress"), "score": ex.get("score")}
+    name = title_of(media)
+    cap = f"📺 <b>{name}</b>"
+    yr = sget(media, "seasonYear")
+    if yr:
+        cap += f"  ({yr})"
+    cap += f"\n⭐ {sget(media,'averageScore') or 0}%"
+    eps = sget(media, "episodes") or sget(media, "chapters")
+    if eps:
+        cap += f"  •  🎞️ {eps}"
+    if my:
+        cap += f"\n📌 عندك: {status_ar(my.get('status'))}"
+        if my.get("progress"):
+            cap += f" ({my['progress']})"
+    kb = kb_make([[{"text": "🔗 AniList", "url": sget(media, "siteUrl") or "https://anilist.co"}]])
+    tg_photo(cid, cover_of(media), cap, kb)
+    out = _compact_media(media) or {}
+    out["my_entry"] = my
+    return {"ok": True, "info": out}
+
+
+def _tool_track_media(cid, args, me):
+    if not ANILIST_TOKEN:
+        return {"error": "حساب AniList غير مربوط"}
+    media_id = args.get("media_id")
+    if not media_id:
+        return {"error": "media_id مطلوب — استدعِ search_anime أولاً"}
+    mt = args.get("type") or "ANIME"
+    part = args.get("part")
+    if part:
+        try:
+            parts_map = resolve_franchise_parts(int(media_id))
+            if part == "latest":
+                chosen = pick_latest_part(parts_map)
+            else:
+                chosen = pick_nth_part(parts_map, int(part)) or pick_latest_part(parts_map)
+            media_id = (chosen or {}).get("id", media_id)
+        except Exception:
+            pass
+    media = get_media_by_id(int(media_id))
+    if not media:
+        return {"error": "ما لقيت هذا الأنمي"}
+    mid = media["id"]
+    status = args.get("status") or "CURRENT"
+    score = args.get("score")
+    fresh = bool(args.get("fresh_start"))
+    existing = get_entry(mid, ANILIST_TOKEN)
+    cur_prog = (existing or {}).get("progress") or 0
+    prev_status = (existing or {}).get("status")
+    prev_score = (existing or {}).get("score")
+    prev_existed = bool(existing)
+    entry_id = (existing or {}).get("id")
+    total = sget(media, "episodes") or sget(media, "chapters") or 0
+    new_prog = cur_prog
+    if args.get("progress") is not None:
+        new_prog = int(args["progress"])
+    elif args.get("progress_delta") is not None:
+        delta = int(args["progress_delta"])
+        if fresh and prev_existed and cur_prog > 0:
+            new_prog = delta  # "بدأت ... شفت N" resets to N
+        else:
+            new_prog = cur_prog + delta
+    elif status == "COMPLETED" and total > 0:
+        new_prog = total
+    elif status == "COMPLETED":
+        new_prog = None
+    if new_prog is not None and total and new_prog > total:
+        new_prog = total
+    if new_prog is not None and new_prog < 0:
+        new_prog = 0
+    res = save_entry(mid, ANILIST_TOKEN, status=status, score=score, progress=new_prog)
+    if isinstance(res, dict) and res.get("error"):
+        return {"error": f"خطأ من AniList: {res['error'][:150]}"}
+    new_entry_id = sget(res, "id") or entry_id
+    if args.get("favorite"):
+        try:
+            toggle_fav(mid, ANILIST_TOKEN, mt)
+        except Exception:
+            pass
+    set_last_action(
+        cid,
+        {
+            "type": "save",
+            "media_id": mid,
+            "entry_id": new_entry_id,
+            "media_title": title_of(media),
+            "media_type": mt,
+            "prev_existed": prev_existed,
+            "prev_progress": cur_prog,
+            "prev_status": prev_status,
+            "prev_score": prev_score,
+        },
+    )
+    name = title_of(media)
+    unit = "الفصل" if mt == "MANGA" else "الحلقة"
+    cap = f"✅ <b>تم التحديث!</b>\n\n📺 <b>{name}</b>"
+    yr = sget(media, "seasonYear")
+    if yr:
+        cap += f"  ({yr})"
+    cap += f"\n📌 {status_ar(status)}"
+    if new_prog is not None:
+        cap += f"\n🔢 {unit}: <b>{new_prog}</b>"
+        if total:
+            cap += f"/{total}"
+    if score is not None:
+        cap += f"\n⭐ التقييم: {score}/10"
+    if args.get("favorite"):
+        cap += "\n❤️ أضيف للمفضلة!"
+    kb = kb_make([[{"text": "🔗 AniList", "url": sget(media, "siteUrl") or "https://anilist.co"}]])
+    tg_photo(cid, cover_of(media), cap, kb)
+    return {"ok": True, "title": name, "status": status, "progress": new_prog, "total": total}
+
+
+def _tool_delete_entry(cid, args, me):
+    if not ANILIST_TOKEN:
+        return {"error": "حساب AniList غير مربوط"}
+    eid = args.get("entry_id")
+    if not eid:
+        return {"error": "entry_id مطلوب — استدعِ search_my_list أولاً"}
+    media_id = args.get("media_id")
+    title = args.get("title") or ""
+    prev_status = prev_prog = prev_score = None
+    if media_id:
+        try:
+            ex = get_entry(int(media_id), ANILIST_TOKEN) or {}
+            prev_status = ex.get("status")
+            prev_prog = ex.get("progress")
+            prev_score = ex.get("score")
+        except Exception:
+            pass
+    ok = delete_entry(int(eid), ANILIST_TOKEN)
+    if not ok:
+        return {"error": "فشل الحذف — ممكن الإدخال محذوف مسبقاً أو AniList متعطّلة"}
+    set_last_action(
+        cid,
+        {
+            "type": "delete",
+            "media_id": media_id,
+            "media_title": title,
+            "prev_status": prev_status,
+            "prev_progress": prev_prog,
+            "prev_score": prev_score,
+        },
+    )
+    tg_send(cid, f"🗑️ تم حذف <b>{title or 'الإدخال'}</b> من قائمتك.\n♻️ تقدر ترجّعه بـ <b>تراجع</b> أو /undo.")
+    return {"ok": True, "title": title}
+
+
+def _tool_undo_last(cid, args, me):
+    last = get_last_action(cid)
+    if not last:
+        return {"error": "ما في إجراء سابق أقدر أرجّعه"}
+    if not ANILIST_TOKEN:
+        return {"error": "حساب AniList غير مربوط"}
+    msg = ""
+    if last.get("type") == "save":
+        mid = last["media_id"]
+        if not last.get("prev_existed"):
+            ok = delete_entry(last.get("entry_id"), ANILIST_TOKEN)
+            msg = "↩️ رجّعت الإضافة (حذفت الإدخال)." if ok else "❌ ما قدرت أرجّع."
+        else:
+            res = save_entry(
+                mid,
+                ANILIST_TOKEN,
+                status=last.get("prev_status"),
+                score=last.get("prev_score"),
+                progress=last.get("prev_progress"),
+            )
+            msg = (
+                f"↩️ رجّعت <b>{last.get('media_title')}</b> للتقدم السابق."
+                if not (isinstance(res, dict) and res.get("error"))
+                else f"❌ خطأ: {res.get('error', '')}"
+            )
+    elif last.get("type") == "delete":
+        res = save_entry(
+            last["media_id"],
+            ANILIST_TOKEN,
+            status=last.get("prev_status") or "CURRENT",
+            score=last.get("prev_score"),
+            progress=last.get("prev_progress"),
+        )
+        msg = (
+            f"↩️ رجّعت <b>{last.get('media_title')}</b> لقائمتك."
+            if not (isinstance(res, dict) and res.get("error"))
+            else f"❌ خطأ: {res.get('error', '')}"
+        )
+    else:
+        msg = "❌ ما أقدر أرجّع هذا الإجراء."
+    store_del(f"last:{cid}")
+    tg_send(cid, msg)
+    return {"ok": True, "message": msg}
+
+
+def _tool_toggle_favorite(cid, args, me):
+    if not ANILIST_TOKEN:
+        return {"error": "حساب AniList غير مربوط"}
+    mid = args.get("media_id")
+    mt = args.get("type") or "ANIME"
+    if not mid:
+        return {"error": "media_id مطلوب"}
+    media = get_media_by_id(int(mid))
+    if not media:
+        return {"error": "ما لقيت هذا الأنمي"}
+    try:
+        toggle_fav(int(mid), ANILIST_TOKEN, mt)
+    except Exception as e:
+        return {"error": f"فشل: {e}"}
+    tg_photo(cid, cover_of(media), f"❤️ بدّلت حالة المفضلة لـ <b>{title_of(media)}</b>")
+    return {"ok": True, "title": title_of(media)}
+
+
+# ---- browse / discovery tools (render albums) ----
+def _album_from_list(cid, media_list, caption_fn, header=None):
+    items = [
+        {"url": cover_of(m), "caption": caption_fn(m)}
+        for m in media_list
+        if cover_of(m)
+    ]
+    if not items:
+        return 0
+    if header:
+        tg_send(cid, header)
+    tg_album(cid, items)
+    return len(items)
+
+
+def _tool_get_trending(cid, args, me):
+    try:
+        n = int(args.get("n") or 8)
+    except Exception:
+        n = 8
+    r = get_trending(n)
+    if not r:
+        return {"error": "ما قدرت أجيب الترند (ممكن AniList متعطّلة، جرّب بعد شوي)"}
+    c = _album_from_list(
+        cid, r, lambda x: f"<b>{title_of(x)}</b>\n⭐ {x.get('averageScore', 0)}%"
+    )
+    return {"ok": True, "count": c}
+
+
+def _tool_get_seasonal(cid, args, me):
+    s, y = current_season()
+    r = get_seasonal(s, y, 8)
+    if not r:
+        return {"error": "ما قدرت أجيب أنميات الموسم (ممكن AniList متعطّلة)"}
+    c = _album_from_list(
+        cid, r, lambda x: f"<b>{title_of(x)}</b>\n⭐ {x.get('averageScore', 0)}%"
+    )
+    return {"ok": True, "count": c, "season": s, "year": y}
+
+
+def _tool_get_top_rated(cid, args, me):
+    try:
+        n = int(args.get("n") or 8)
+    except Exception:
+        n = 8
+    res = _gql(
+        """query($n:Int){Page(perPage:$n){media(type:ANIME,sort:SCORE_DESC){
+        id title{romaji english} coverImage{large} averageScore siteUrl}}}""",
+        {"n": n},
+    )
+    err = _gql_errors(res)
+    if err:
+        return {"error": ("AniList متعطّلة مؤقتاً" if _looks_disabled(err) else err)}
+    media_list = sget(res, "data", "Page", "media", default=[]) or []
+    if not media_list:
+        return {"error": "ما قدرت أجلب الأعلى تقييماً"}
+    c = _album_from_list(
+        cid, media_list, lambda x: f"<b>{title_of(x)}</b>\n⭐ {x.get('averageScore', 0)}%"
+    )
+    return {"ok": True, "count": c}
+
+
+def _tool_get_recommendations(cid, args, me):
+    mid = args.get("media_id")
+    if not mid:
+        # fall back to a trending pick
+        tr = get_trending(10)
+        if not tr:
+            return {"error": "ما قدرت أجيب توصيات الآن"}
+        import random as _r
+
+        mid = (_r.choice(tr)).get("id")
+    recs = get_recommendations(int(mid), per_page=6)
+    if not recs:
+        return {"error": "ما في توصيات متاحة لهذا الأنمي"}
+    c = _album_from_list(
+        cid, recs, lambda x: f"<b>{title_of(x)}</b>\n⭐ {x.get('averageScore', 0)}%"
+    )
+    return {"ok": True, "count": c}
+
+
+_REL_AR = {
+    "SEQUEL": "تتمة",
+    "PREQUEL": "جزء سابق",
+    "SIDE_STORY": "قصة جانبية",
+    "ADAPTATION": "اقتباس",
+    "SPIN_OFF": "سبن أوف",
+    "PARENT": "العمل الأصل",
+    "CHARACTER": "شخصية مشتركة",
+    "SUMMARY": "ملخص",
+    "ALTERNATIVE": "بديل",
+    "OTHER": "أخرى",
+    "CONTAINS": "يحتوي",
+    "COMPILATION": "تجميع",
+}
+
+
+def _tool_get_relations(cid, args, me):
+    mid = args.get("media_id")
+    if not mid:
+        return {"error": "media_id مطلوب"}
+    edges = get_relations(int(mid))
+    if not edges:
+        return {"error": "ما في علاقات مسجّلة لهذا الأنمي"}
+    items = []
+    for e in edges[:8]:
+        node = e.get("node") or {}
+        rel = _REL_AR.get(e.get("relationType", ""), e.get("relationType", ""))
+        url = cover_of(node)
+        if url:
+            items.append({"url": url, "caption": f"<b>{title_of(node)}</b>\n🔗 {rel}"})
+    if items:
+        tg_album(cid, items)
+    return {"ok": True, "count": len(items)}
+
+
+def _tool_get_airing(cid, args, me):
+    mid = args.get("media_id")
+    if not mid:
+        return {"error": "media_id مطلوب"}
+    media = get_media_by_id(int(mid))
+    if not media:
+        return {"error": "ما لقيت هذا الأنمي"}
+    schedule = get_airing(int(mid))
+    if not schedule:
+        return {"error": f"{title_of(media)} منتهي أو غير مجدول حالياً."}
+    secs = schedule.get("timeUntilAiring", 0) or 0
+    ep = schedule.get("episode", "?")
+    days = secs // 86400
+    hours = (secs % 86400) // 3600
+    mins = (secs % 3600) // 60
+    parts = []
+    if days:
+        parts.append(f"{days} يوم")
+    if hours:
+        parts.append(f"{hours} ساعة")
+    if mins:
+        parts.append(f"{mins} دقيقة")
+    countdown = " و ".join(parts) or "أقل من دقيقة"
+    cap = f"📺 <b>{title_of(media)}</b>\n\n⏱️ الحلقة {ep} بعد: <b>{countdown}</b>"
+    tg_photo(cid, cover_of(media), cap)
+    return {"ok": True, "episode": ep, "countdown": countdown}
+
+
+def _tool_search_character(cid, args, me):
+    name = args.get("name")
+    if not name:
+        return {"error": "اكتب اسم الشخصية"}
+    ch = search_character_q(name)
+    if not ch:
+        return {"error": f"ما لقيت شخصية: {name}"}
+    full = sget(ch, "name", "full") or name
+    native = sget(ch, "name", "native") or ""
+    nodes = sget(ch, "media", "nodes") or []
+    anime = title_of(nodes[0]) if nodes else "غير محدد"
+    cap = f"👤 <b>{full}</b>" + (f" ({native})" if native else "") + f"\n\n📺 من: <b>{anime}</b>"
+    kb = kb_make([[{"text": "🔗 AniList", "url": ch.get("siteUrl") or "https://anilist.co"}]])
+    tg_photo(cid, sget(ch, "image", "large"), cap, kb)
+    return {"ok": True, "name": full}
+
+
+def _tool_search_studio(cid, args, me):
+    name = args.get("name")
+    if not name:
+        return {"error": "اكتب اسم الاستديو"}
+    studio = search_studio_q(name)
+    if not studio:
+        return {"error": f"ما لقيت استديو: {name}"}
+    works = sget(studio, "media", "nodes") or []
+    if not works:
+        return {"error": f"ما في أعمال مسجّلة لاستديو {studio.get('name')}"}
+    c = _album_from_list(
+        cid, works[:8], lambda w: f"<b>{title_of(w)}</b>\n⭐ {w.get('averageScore', 0)}%"
+    )
+    return {"ok": True, "studio": studio.get("name"), "count": c}
+
+
+# ---- self / social tools ----
+def _tool_get_my_stats(cid, args, me):
+    username = args.get("username")
+    if not username:
+        if not me:
+            return {"error": "ما قدرت أجيب حسابك"}
+        username = me["name"]
+    stats = get_stats(username)
+    if not stats:
+        return {"error": "ما لقيت إحصائيات (ممكن AniList متعطّلة أو اسم غلط)"}
+    a = stats.get("anime") or {}
+    m = stats.get("manga") or {}
+    mins = a.get("minutesWatched", 0) or 0
+    days = mins // 1440
+    hours = (mins % 1440) // 60
+    genres = ", ".join([g.get("genre", "") for g in (a.get("genres") or [])[:3]]) or "—"
+    studios = ", ".join([sget(s, "studio", "name") for s in (a.get("studios") or [])[:3]]) or "—"
+    cap = (
+        f"📊 <b>إحصائيات {username}</b>\n\n"
+        f"📺 <b>الأنمي:</b>\n"
+        f"  • العدد: {a.get('count', 0)}\n"
+        f"  • الحلقات: {a.get('episodesWatched', 0)}\n"
+        f"  • وقت المشاهدة: {days} يوم و {hours} ساعة\n"
+        f"  • متوسط التقييم: {a.get('meanScore', 0)}/100\n"
+        f"  • الأنواع المفضلة: {genres}\n"
+        f"  • الاستديوهات المفضلة: {studios}\n\n"
+        f"📖 <b>المانجا:</b>\n"
+        f"  • العدد: {m.get('count', 0)}\n"
+        f"  • الفصول: {m.get('chaptersRead', 0)}\n"
+        f"  • متوسط التقييم: {m.get('meanScore', 0)}/100"
+    )
+    tg_send(cid, cap)
+    return {"ok": True}
+
+
+def _tool_get_my_activity(cid, args, me):
+    if not me:
+        return {"error": "ما قدرت أجيب حسابك"}
+    acts = get_activities(me["id"])
+    if not acts:
+        return {"error": "ما في نشاطات حديثة"}
+    items = []
+    for act in acts[:8]:
+        media = act.get("media") or {}
+        if not media:
+            continue
+        st = act.get("status", "") or ""
+        prog = act.get("progress", "") or ""
+        cap = f"<b>{title_of(media)}</b>\n{status_ar(st) if st in STATUS_AR else st}"
+        if prog:
+            cap += f" {prog}"
+        url = cover_of(media)
+        if url:
+            items.append({"url": url, "caption": cap})
+    if items:
+        tg_album(cid, items)
+        return {"ok": True, "count": len(items)}
+    return {"error": "ما في نشاطات فيها صور"}
+
+
+def _tool_get_my_list(cid, args, me):
+    if not me:
+        return {"error": "ما قدرت أجيب حسابك"}
+    status = args.get("status")
+    mt = args.get("type") or "ANIME"
+    sort = ["SCORE_DESC", "UPDATED_TIME_DESC"] if status == "COMPLETED" else ["UPDATED_TIME_DESC"]
+    entries = get_media_list(username=me["name"], media_type=mt, status=status, sort=sort, per_page=8)
+    if not entries:
+        return {"error": "قائمتك فاضية بهذا الفلتر"}
+    items = []
+    for e in entries[:8]:
+        media = e.get("media") or {}
+        cap = f"<b>{title_of(media)}</b>"
+        if e.get("progress"):
+            cap += f" — {e['progress']} حلقة"
+        if e.get("score"):
+            cap += f" | ⭐ {e['score']}"
+        url = cover_of(media)
+        if url:
+            items.append({"url": url, "caption": cap})
+    if items:
+        tg_album(cid, items)
+        return {"ok": True, "count": len(items)}
+    return {"error": "ما في نتائج فيها صور"}
+
+
+def _tool_get_my_following(cid, args, me):
+    if not me:
+        return {"error": "ما قدرت أجيب حسابك"}
+    following = get_following(me["id"])
+    if not following:
+        return {"error": "ما تتابع أحد حالياً على AniList"}
+    cap = f"👥 <b>قائمة متابعينك ({len(following)}):</b>\n\n"
+    for u in following:
+        a = (u.get("statistics") or {}).get("anime") or {}
+        cap += f"• <b>{u.get('name','—')}</b> — {a.get('count', 0)} أنمي | ⭐ {a.get('meanScore', 0)}\n"
+    tg_send(cid, cap)
+    return {"ok": True, "count": len(following)}
+
+
+def _tool_get_profile(cid, args, me):
+    username = args.get("username")
+    if not username:
+        return {"error": "اكتب اسم المستخدم"}
+    user = get_profile(username)
+    if not user:
+        return {"error": f"ما لقيت مستخدم: {username}"}
+    a = sget(user, "statistics", "anime") or {}
+    m = sget(user, "statistics", "manga") or {}
+    cap = (
+        f"👤 <b>{user.get('name')}</b>\n\n"
+        f"📺 أنمي: {a.get('count', 0)} | حلقات: {a.get('episodesWatched', 0)}\n"
+        f"📖 مانجا: {m.get('count', 0)} | فصول: {m.get('chaptersRead', 0)}\n"
+        f"⭐ متوسط تقييم الأنمي: {a.get('meanScore', 0)}/100"
+    )
+    kb = kb_make([[{"text": "🔗 AniList", "url": user.get("siteUrl") or "https://anilist.co"}]])
+    tg_photo(cid, sget(user, "avatar", "large"), cap, kb)
+    return {"ok": True, "name": user.get("name")}
+
+
+def _tool_get_friend_list(cid, args, me):
+    username = args.get("username")
+    if not username:
+        return {"error": "اكتب اسم المستخدم"}
+    entries = get_media_list(username=username, per_page=8)
+    if not entries:
+        return {"error": f"ما في نتائج لـ {username}"}
+    items = []
+    for e in entries[:8]:
+        media = e.get("media") or {}
+        cap = f"<b>{title_of(media)}</b>" + (f"\n⭐ {e['score']}" if e.get("score") else "")
+        url = cover_of(media)
+        if url:
+            items.append({"url": url, "caption": cap})
+    if items:
+        tg_album(cid, items)
+        return {"ok": True, "count": len(items)}
+    return {"error": "ما في نتائج"}
+
+
+def _tool_compare_with(cid, args, me):
+    username = args.get("username")
+    if not username:
+        return {"error": "اكتب اسم الصديق للمقارنة"}
+    if not me:
+        return {"error": "ما قدرت أجيب حسابك"}
+    my_list = get_media_list(username=me["name"], status="COMPLETED", per_page=50)
+    fr_list = get_media_list(username=username, status="COMPLETED", per_page=50)
+    my_ids = {e["media"]["id"]: e for e in my_list if sget(e, "media")}
+    fr_ids = {e["media"]["id"]: e for e in fr_list if sget(e, "media")}
+    shared = set(my_ids) & set(fr_ids)
+    only_me = set(my_ids) - set(fr_ids)
+    only_fr = set(fr_ids) - set(my_ids)
+    cap = (
+        f"🆚 <b>مقارنة: {me['name']} vs {username}</b>\n\n"
+        f"🤝 مشترك: {len(shared)} أنمي\n"
+        f"👤 عندك فقط: {len(only_me)} أنمي\n"
+        f"👥 عند {username} فقط: {len(only_fr)} أنمي\n"
+    )
+    if shared:
+        cap += "\n<b>تقييمات مشتركة:</b>\n"
+        for sid in list(shared)[:6]:
+            e = my_ids.get(sid) or {}
+            name = title_of(e.get("media") or {})
+            ms = e.get("score", 0)
+            fs = (fr_ids.get(sid) or {}).get("score", 0)
+            cap += f"• {name}: أنت {ms} | {username} {fs}\n"
+    tg_send(cid, cap)
+    return {"ok": True, "shared": len(shared), "only_me": len(only_me), "only_fr": len(only_fr)}
+
+
+def _tool_surprise_me(cid, args, me):
+    mode = random.choice(["rec", "flashback", "stat", "random"])
+    if mode == "flashback" and me:
+        entries = get_media_list(username=me["name"], status="COMPLETED", per_page=50)
+        if entries:
+            e = random.choice(entries)
+            media = e.get("media") or {}
+            cap = f"💭 <b>فلاش باك!</b>\n\n<b>{title_of(media)}</b>\nقيّمته: ⭐ {e.get('score', 0)}/10\n\nتتذكره؟ 🤔"
+            tg_photo(cid, cover_of(media), cap)
+            return {"ok": True, "mode": "flashback"}
+    if mode == "stat" and me:
+        stats = get_stats(me["name"])
+        if stats:
+            a = stats.get("anime") or {}
+            mins = a.get("minutesWatched", 0) or 0
+            eps = a.get("episodesWatched", 0) or 0
+            days = mins // 1440
+            tg_send(cid, f"🤯 <b>هل تعلم؟</b>\n\nشفت <b>{eps}</b> حلقة أنمي!\nيعادل <b>{days} يوم</b> مشاهدة متواصلة! 📺")
+            return {"ok": True, "mode": "stat"}
+    if mode == "rec":
+        trending = get_trending(10)
+        if trending:
+            pick = random.choice(trending)
+            cap = f"🔥 <b>جرّب هذا!</b>\n\n<b>{title_of(pick)}</b>\n⭐ {pick.get('averageScore', 0)}%\n\nأنمي ترند الحين!"
+            kb = kb_make([[{"text": "🔗 AniList", "url": pick.get("siteUrl") or "https://anilist.co"}]])
+            tg_photo(cid, cover_of(pick), cap, kb)
+            return {"ok": True, "mode": "rec"}
+    # random anime
+    genre = random.choice(["Action", "Adventure", "Comedy", "Drama", "Fantasy", "Mystery", "Romance", "Sci-Fi"])
+    page = random.randint(1, 10)
+    res = _gql(
+        """query($g:String,$p:Int){Page(page:$p,perPage:1){media(type:ANIME,genre:$g,sort:POPULARITY_DESC){
+        id title{romaji english} coverImage{large} averageScore siteUrl episodes}}}""",
+        {"g": genre, "p": page},
+    )
+    media_list = sget(res, "data", "Page", "media", default=[]) or []
+    if not media_list:
+        return {"error": "ما لقيت أنمي عشوائي، جرّب مرة ثانية"}
+    m = media_list[0]
+    cap = f"🎲 <b>أنمي عشوائي ({genre}):</b>\n\n<b>{title_of(m)}</b>\n⭐ {m.get('averageScore', 0)}%\n📺 {m.get('episodes', '?')} حلقة"
+    tg_photo(cid, cover_of(m), cap)
+    return {"ok": True, "mode": "random"}
+
+
+def _tool_get_news(cid, args, me):
+    news_items = []
+    if me:
+        current_list = get_media_list(username=me["name"], status="CURRENT", per_page=5)
+        for e in current_list[:3]:
+            media = e.get("media") or {}
+            schedule = get_airing(media.get("id"))
+            if schedule:
+                ep = schedule.get("episode", "?")
+                secs = schedule.get("timeUntilAiring", 0) or 0
+                d = secs // 86400
+                news_items.append(f"📺 <b>{title_of(media)}</b> — الحلقة {ep} بعد {d} يوم")
+    trending = get_trending(5)
+    for t in trending[:2]:
+        news_items.append(f"🔥 ترند: <b>{title_of(t)}</b> — ⭐ {t.get('averageScore', 0)}%")
+    if news_items:
+        tg_send(cid, "📰 <b>أخبار أنمياتك:</b>\n\n" + "\n\n".join(news_items))
+        return {"ok": True, "count": len(news_items)}
+    return {"error": "ما في أخبار جديدة حالياً"}
+
+
+# ============================================================
+# TOOL DISPATCH TABLE + Gemini function declarations
+# ============================================================
+TOOL_DISPATCH = {
+    "search_my_list": _tool_search_my_list,
+    "search_anime": _tool_search_anime,
+    "get_media_info": _tool_get_media_info,
+    "track_media": _tool_track_media,
+    "delete_entry": _tool_delete_entry,
+    "undo_last": _tool_undo_last,
+    "toggle_favorite": _tool_toggle_favorite,
+    "get_trending": _tool_get_trending,
+    "get_seasonal": _tool_get_seasonal,
+    "get_top_rated": _tool_get_top_rated,
+    "get_recommendations": _tool_get_recommendations,
+    "get_relations": _tool_get_relations,
+    "get_airing": _tool_get_airing,
+    "search_character": _tool_search_character,
+    "search_studio": _tool_search_studio,
+    "get_my_stats": _tool_get_my_stats,
+    "get_my_activity": _tool_get_my_activity,
+    "get_my_list": _tool_get_my_list,
+    "get_my_following": _tool_get_my_following,
+    "get_profile": _tool_get_profile,
+    "get_friend_list": _tool_get_friend_list,
+    "compare_with": _tool_compare_with,
+    "surprise_me": _tool_surprise_me,
+    "get_news": _tool_get_news,
+}
+
+
+def _decl(name, description, properties, required=None):
+    return {
+        "name": name,
+        "description": description,
+        "parameters": {
+            "type": "object",
+            "properties": properties,
+            "required": required or [],
+        },
+    }
+
+
+GEMINI_TOOLS = [
+    _decl(
+        "search_my_list",
+        "يبحث في قائمة المستخدم نفسه على AniList (وليس بحثاً عاماً). استخدمه دائماً قبل الحذف أو التعديل. يرجع entry_id و media_id و title و status و progress.",
+        {
+            "query": {"type": "string", "description": "نص البحث (جزء من العنوان)"},
+            "type": {"type": "string", "enum": ["ANIME", "MANGA"], "description": "افتراضياً ANIME"},
+        },
+        ["query"],
+    ),
+    _decl(
+        "search_anime",
+        "بحث عام في قاعدة AniList لجلب media_id وعنوان وبيانات الأنمي/المانجا. استخدمه قبل track_media أو get_relations/get_airing.",
+        {
+            "query": {"type": "string"},
+            "type": {"type": "string", "enum": ["ANIME", "MANGA"]},
+            "per_page": {"type": "integer", "description": "عدد النتائج (افتراضي 5)"},
+        },
+        ["query"],
+    ),
+    _decl(
+        "get_media_info",
+        "يعرض بطاقة معلومات لأنمي معيّن (media_id) + حالته في قائمتك.",
+        {"media_id": {"type": "integer"}},
+        ["media_id"],
+    ),
+    _decl(
+        "track_media",
+        "يسجّل/يحدّث تتبّع أنمي في قائمتك (status, progress, score, مفضلة). pass media_id. للبداية الجديدة اجعل fresh_start=true. للجزء/الموسم مرّر part='latest' أو رقم.",
+        {
+            "media_id": {"type": "integer"},
+            "status": {"type": "string", "enum": ["CURRENT", "COMPLETED", "PLANNING", "PAUSED", "DROPPED", "REPEATING"]},
+            "progress": {"type": "integer", "description": "رقم الحلقة/الفصل المطلق النهائي"},
+            "progress_delta": {"type": "integer", "description": "عدد حلقات للإضافة على التقدم الحالي"},
+            "fresh_start": {"type": "boolean"},
+            "score": {"type": "number", "description": "تقييم 0-10"},
+            "favorite": {"type": "boolean"},
+            "type": {"type": "string", "enum": ["ANIME", "MANGA"]},
+            "part": {"type": "string", "description": "'latest' للأحدث أو رقم الجزء"},
+        },
+        ["media_id"],
+    ),
+    _decl(
+        "delete_entry",
+        "يحذف إدخالاً من قائمتك. entry_id و media_id و title تأتي من search_my_list. لا تستخدمه إلا بعد تأكيد المستخدم إذا كان هناك لبس.",
+        {
+            "entry_id": {"type": "integer"},
+            "media_id": {"type": "integer"},
+            "title": {"type": "string"},
+        },
+        ["entry_id"],
+    ),
+    _decl("undo_last", "يرجّع آخر إجراء (تتبّع أو حذف).", {}),
+    _decl(
+        "toggle_favorite",
+        "يبدّل حالة المفضلة لأنمي/مانجا.",
+        {"media_id": {"type": "integer"}, "type": {"type": "string", "enum": ["ANIME", "MANGA"]}},
+        ["media_id"],
+    ),
+    _decl("get_trending", "يعرض الأكثر ترنداً الآن.", {"n": {"type": "integer"}}),
+    _decl("get_seasonal", "يعرض أنميات الموسم الحالي.", {}),
+    _decl("get_top_rated", "يعرض الأعلى تقييماً.", {"n": {"type": "integer"}}),
+    _decl("get_recommendations", "توصيات مشابهة لأنمي (media_id).", {"media_id": {"type": "integer"}}),
+    _decl("get_relations", "العلاقات/الأجزاء لأنمي (media_id).", {"media_id": {"type": "integer"}}, ["media_id"]),
+    _decl("get_airing", "متى الحلقة القادمة لأنمي (media_id).", {"media_id": {"type": "integer"}}, ["media_id"]),
+    _decl("search_character", "يبحث عن شخصية ويعرض بطاقتها.", {"name": {"type": "string"}}, ["name"]),
+    _decl("search_studio", "يبحث عن استديو ويعرض أعماله.", {"name": {"type": "string"}}, ["name"]),
+    _decl("get_my_stats", "إحصائيات المستخدم (أو صديق عبر username).", {"username": {"type": "string"}}),
+    _decl("get_my_activity", "آخر نشاطاتك على AniList.", {}),
+    _decl("get_my_list", "قائمتك حسب الحالة.", {"status": {"type": "string", "enum": ["CURRENT", "COMPLETED", "PLANNING", "PAUSED", "DROPPED", "REPEATING"]}, "type": {"type": "string", "enum": ["ANIME", "MANGA"]}}),
+    _decl("get_my_following", "قائمة من تتابعهم على AniList.", {}),
+    _decl("get_profile", "بروفايل مستخدم.", {"username": {"type": "string"}}, ["username"]),
+    _decl("get_friend_list", "قائمة مستخدم على AniList.", {"username": {"type": "string"}}, ["username"]),
+    _decl("compare_with", "يقارن قائمتك المكتملة مع صديق.", {"username": {"type": "string"}}, ["username"]),
+    _decl("surprise_me", "يفاجئ المستخدم باقتراح/إحصائية/فلاش باك.", {}),
+    _decl("get_news", "آخر أخبار أنمياتك الحالية + الترند.", {}),
+]
+
+
+def dispatch_tool(cid, name, args, me):
+    fn = TOOL_DISPATCH.get(name)
+    if not fn:
+        return {"error": f"أداة غير معروفة: {name}"}
+    try:
+        return fn(cid, args or {}, me)
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
+# ============================================================
+# GEMINI GENERATE + AGENT LOOP
+# ============================================================
+def _gemini_generate(contents):
+    """Call Gemini generateContent with tools. Returns parsed JSON or None on total failure."""
+    models = []
+    for m in [GEMINI_MODEL, "gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.0-flash-lite"]:
+        if m and m not in models:
+            models.append(m)
+    payload = {
+        "contents": contents,
+        "tools": [{"functionDeclarations": GEMINI_TOOLS}],
+        "systemInstruction": {"parts": [{"text": AGENT_SYSTEM_PROMPT}]},
+        "generationConfig": {"temperature": 0.2},
+    }
+    data = json.dumps(payload).encode("utf-8")
+    last_err = None
+    for model in models:
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent?key={GEMINI_KEY}"
+        )
         req = urllib.request.Request(
             url, data=data, headers={"Content-Type": "application/json"}
         )
         try:
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                res = json.loads(resp.read().decode("utf-8"))
-                content = res["candidates"][0]["content"]["parts"][0]["text"]
-                parsed = json.loads(content)
-                # merge defaults so missing keys don't crash handlers
-                base = regex_parse(text)
-                base.update(parsed)
-                base["original_text"] = text
-                base["_parser"] = f"gemini:{model_name}"
-                return base
+            with urllib.request.urlopen(req, timeout=GEMINI_TIMEOUT) as resp:
+                return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            err = ""
             try:
                 err = e.read().decode("utf-8")[:200]
             except Exception:
-                pass
-            print(f"[Gemini] {model_name} HTTP {e.code}: {err}")
-            last_error = f"HTTP {e.code}"
-            if e.code in (429, 503):
-                continue
+                err = ""
+            print(f"[Gemini] {model} HTTP {e.code}: {err}")
+            last_err = f"HTTP {e.code}"
         except Exception as e:
-            print(f"[Gemini] {model_name} FAILED: {type(e).__name__}: {e}")
-            last_error = f"{type(e).__name__}: {e}"
-    result = regex_parse(text)
-    result["_parser"] = f"regex_fallback:{last_error}"
-    return result
+            print(f"[Gemini] {model} FAILED: {type(e).__name__}: {e}")
+            last_err = f"{type(e).__name__}: {e}"
+    print(f"[Gemini] all models failed: {last_err}")
+    return None
 
+
+def _build_contents(cid):
+    """Build Gemini contents[] from stored conversation context (user/model turns)."""
+    contents = []
+    for m in get_context(cid):
+        role = "user" if m.get("role") == "user" else "model"
+        t = (m.get("text") or "").strip()
+        if not t:
+            continue
+        if contents and contents[-1]["role"] == role:
+            contents[-1]["parts"][0]["text"] += "\n" + t
+        else:
+            contents.append({"role": role, "parts": [{"text": t}]})
+    # Gemini requires the first turn to be 'user'
+    if contents and contents[0]["role"] != "user":
+        contents.insert(0, {"role": "user", "parts": [{"text": "مرحبا"}]})
+    return contents
+
+
+def run_agent(cid, text):
+    """Run the multi-step Gemini agent. Returns True if a reply was sent, False on failure (caller falls back)."""
+    if not GEMINI_KEY:
+        return False
+    me = _viewer_me()
+    contents = _build_contents(cid)
+    if not contents:
+        contents = [{"role": "user", "parts": [{"text": text}]}]
+
+    for _step in range(MAX_STEPS):
+        resp = _gemini_generate(contents)
+        if resp is None:
+            return False
+        cands = resp.get("candidates") or []
+        if not cands:
+            fb = resp.get("promptFeedback") or {}
+            if fb.get("blockReason"):
+                print(f"[Gemini] blocked: {fb.get('blockReason')}")
+            return False
+        cand = cands[0]
+        cparts = sget(cand, "content", "parts", default=[]) or []
+        if not cparts:
+            return False
+
+        tool_calls = [p for p in cparts if "functionCall" in p]
+        if tool_calls:
+            # acknowledge any intermediate thought-text is ignored; execute tools
+            for p in tool_calls:
+                fc = p.get("functionCall") or {}
+                name = fc.get("name")
+                fargs = fc.get("args") or {}
+                print(f"[Agent] tool: {name} args={fargs}")
+                result = dispatch_tool(cid, name, fargs, me)
+                contents.append(
+                    {
+                        "role": "user",
+                        "parts": [
+                            {
+                                "functionResponse": {
+                                    "name": name,
+                                    "response": result if isinstance(result, dict) else {"result": result},
+                                }
+                            }
+                        ],
+                    }
+                )
+            continue
+
+        # final reply: concatenate text parts
+        final = "".join(p.get("text", "") for p in cparts if "text" in p).strip()
+        if not final:
+            return False
+        tg_send(cid, final)
+        save_context(cid, "bot", final)
+        return True
+
+    # exhausted steps
+    tg_send(cid, "⏳ تعذّر إكمال الطلب الآن، جرّب بصيغة أبسط أو /help.")
+    return True
 
 # ============================================================
-# [9] HANDLER CLASS
+# [9] HANDLER CLASS (v4.0 — agent-driven)
 # ============================================================
 class handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -1226,13 +2165,15 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         if qs.get("test"):
-            self._json(200, self._test_gemini())
+            self._json(200, self._test_agent())
             return
         self._json(
             200,
             {
                 "status": "running",
-                "bot": "المخلافي v3.0",
+                "bot": "المخلافي v4.0",
+                "mode": "gemini-function-calling-agent",
+                "tools": len(GEMINI_TOOLS),
                 "telegram": "SET" if TELEGRAM_TOKEN else "MISSING",
                 "anilist": "SET" if ANILIST_TOKEN else "MISSING",
                 "gemini": "SET" if GEMINI_KEY else "MISSING",
@@ -1248,25 +2189,34 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
-    def _test_gemini(self):
+    def _test_agent(self):
         if not GEMINI_KEY:
             return {"error": "GEMINI_API_KEY not set"}
         t0 = time.time()
         try:
-            result = parse_with_gemini("كملت انمي ون بيس واقيمه 9", chat_id=None)
+            resp = _gemini_generate(
+                [{"role": "user", "parts": [{"text": "ردّ بكلمة واحدة: جاهز"}]}]
+            )
+            ok = bool(resp and resp.get("candidates"))
+            txt = ""
+            if ok:
+                txt = "".join(
+                    p.get("text", "")
+                    for p in sget(resp, "candidates", 0, "content", "parts", default=[])
+                    if "text" in p
+                )[:60]
             return {
-                "gemini_works": str(result.get("_parser", "")).startswith("gemini"),
-                "parser_used": result.get("_parser"),
-                "elapsed_seconds": round(time.time() - t0, 2),
-                "parsed_action": result.get("action"),
-                "parsed_title": result.get("title"),
+                "agent_works": ok,
                 "model": GEMINI_MODEL,
+                "tools": len(GEMINI_TOOLS),
+                "sample_reply": txt,
+                "elapsed_seconds": round(time.time() - t0, 2),
             }
         except Exception as e:
             return {"error": str(e), "type": type(e).__name__}
 
     def do_POST(self):
-        # Always acknowledge Telegram first-thing to avoid retries on slow processing.
+        # Acknowledge Telegram immediately so it doesn't retry on slow processing.
         try:
             body = self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
             update = json.loads(body.decode("utf-8"))
@@ -1275,7 +2225,6 @@ class handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        # process in try/except so we never crash without 200
         try:
             if "callback_query" in update:
                 self._on_callback(update["callback_query"])
@@ -1301,6 +2250,7 @@ class handler(BaseHTTPRequestHandler):
         cid = str(chat_id)
         low = text.lower()
 
+        # Commands handled before the agent (as designed)
         if text.startswith("/start"):
             self._welcome(cid)
             return
@@ -1309,7 +2259,7 @@ class handler(BaseHTTPRequestHandler):
             return
         if text.startswith("/undo"):
             save_context(cid, "user", text)
-            self._undo(cid, {})
+            _tool_undo_last(cid, {}, _viewer_me())
             return
         if text.startswith("/reset"):
             clear_context(cid)
@@ -1319,1193 +2269,109 @@ class handler(BaseHTTPRequestHandler):
 
         save_context(cid, "user", text)
 
-        # 1) pending confirmation flow (نعم / لا)
-        pending = get_pending(cid)
-        if pending:
-            if low in (
-                "نعم",
-                "اي",
-                "أي",
-                "اكيد",
-                "أكيد",
-                "صح",
-                "تمام",
-                "اوك",
-                "ok",
-                "yes",
-                "ايوه",
-                "اه",
-                "آه",
-                "يب",
-                "ايوا",
-                "نعم اعمل",
-                "اي سو",
-            ):
-                clear_pending(cid)
-                self._route(cid, pending)
-                return
-            if low in (
-                "لا",
-                "لأ",
-                "no",
-                "الغي",
-                "إلغاء",
-                "cancel",
-                "خلاص",
-                "لا ما ابي",
-            ):
-                clear_pending(cid)
-                tg_send(cid, "👌 تم الإلغاء.")
-                save_context(cid, "bot", "تم الإلغاء")
-                return
-
-        # 2) undo
+        # Explicit undo words → undo tool directly (fast path)
         if UNDO_RE.search(low):
-            self._undo(cid, {})
+            _tool_undo_last(cid, {}, _viewer_me())
             return
 
-        # 3) parse (Gemini, with regex fallback)
-        parsed = parse_with_gemini(text, cid)
-
-        # 4) confirmation tokens emitted by Gemini
-        if parsed.get("action") == "CHAT":
-            cr = parsed.get("chat_response") or ""
-            if cr.strip() == "__CONFIRM__" and pending:
-                clear_pending(cid)
-                self._route(cid, pending)
-                return
-            if cr.strip() == "__CANCEL__":
-                clear_pending(cid)
-                tg_send(cid, "👌 تم الإلغاء.")
-                save_context(cid, "bot", "تم الإلغاء")
-                return
-
-        # 5) route
-        self._route(cid, parsed)
-
-    # ---------- Routing ----------
-    def _route(self, cid, p):
-        a = p.get("action", "TRACK")
-        # resolve pronoun title from context
-        if not p.get("title") and a in (
-            "TRACK",
-            "DELETE",
-            "RECOMMEND_SIMILAR",
-            "RELATIONS",
-            "AIRING_SCHEDULE",
-            "FAVORITES_ADD",
-            "FAVORITES_REMOVE",
-        ):
-            p["title"] = self._ctx_title(cid)
-        m = {
-            "TRACK": self._track,
-            "DELETE": self._delete,
-            "STATS": self._stats,
-            "ACTIVITY": self._activity,
-            "MY_LIST": self._mylist,
-            "UNDO": self._undo,
-            "FRIEND_PROFILE": self._friend_profile,
-            "FRIEND_LIST": self._friend_list,
-            "FRIEND_ACTIVITY": self._friend_activity,
-            "COMPARE_FRIEND": self._compare,
-            "RECOMMEND_GENRE": self._rec_genre,
-            "RECOMMEND_SIMILAR": self._rec_similar,
-            "RECOMMEND_FROM_LIST": self._rec_from_list,
-            "TRENDING": self._trending,
-            "SEASONAL": self._seasonal,
-            "TOP_RATED": self._top_rated,
-            "RANDOM_ANIME": self._random_anime,
-            "CHARACTER_LOOKUP": self._character,
-            "STAFF_LOOKUP": self._staff,
-            "STUDIO_LOOKUP": self._studio,
-            "RELATIONS": self._relations,
-            "AIRING_SCHEDULE": self._airing,
-            "FAVORITES_LIST": self._fav_list,
-            "FAVORITES_ADD": self._fav_add,
-            "FAVORITES_REMOVE": self._fav_remove,
-            "BATCH_TRACK": self._batch,
-            "SURPRISE": self._surprise,
-            "NEWS": self._news,
-            "CHAT": self._chat,
-            "MY_FOLLOWING": self._my_following,
-            "CORRECT": self._correct,
-        }
-        fn = m.get(a, self._chat)
+        # Primary path: Gemini multi-step agent
         try:
-            fn(cid, p)
+            if run_agent(cid, text):
+                return
         except Exception as e:
             import traceback
 
+            print("[Agent Error]", e)
             traceback.print_exc()
-            tg_send(
-                cid,
-                f"⚠️ صار خطأ أثناء التنفيذ: {str(e)[:150]}\nجرّب بصيغة ثانية أو /help",
-            )
 
-    def _ctx_title(self, cid):
-        for msg in reversed(get_context(cid)):
-            t = sget(msg, "extra", "media_title")
-            if t:
-                return t
-        return None
+        # Fallback: regex parser + minimal tool dispatcher (last resort)
+        self._fallback(cid, text)
 
-    def _last_track_extra(self, cid):
-        for msg in reversed(get_context(cid)):
-            ex = msg.get("extra") or {}
-            if ex.get("action") in ("TRACK", "DELETE") and ex.get("media_id"):
-                return ex
-        return None
+    # ---------- Fallback dispatcher (regex → tools) ----------
+    def _fallback(self, cid, text):
+        parsed = regex_parse(text)
+        parsed["_parser"] = "regex_fallback"
+        action = parsed.get("action", "CHAT")
+        me = _viewer_me()
 
-    # ---------- TRACK ----------
-    def _track(self, cid, p):
-        title = p.get("title")
-        if not title:
-            raw = p.get("original_text", "") or ""
-            ext = _extract_title(raw.lower()) if raw else None
-            if ext:
-                title = ext
-                p["title"] = title
+        if action == "UNDO":
+            _tool_undo_last(cid, {}, me)
+            return
+        if action == "TRENDING":
+            r = _tool_get_trending(cid, {}, me)
+            if r.get("error"):
+                tg_send(cid, "❌ " + r["error"])
+            return
+        if action == "SEASONAL":
+            r = _tool_get_seasonal(cid, {}, me)
+            if r.get("error"):
+                tg_send(cid, "❌ " + r["error"])
+            return
+        if action == "TOP_RATED":
+            r = _tool_get_top_rated(cid, {}, me)
+            if r.get("error"):
+                tg_send(cid, "❌ " + r["error"])
+            return
+        if action == "STATS":
+            r = _tool_get_my_stats(cid, {"username": parsed.get("friend_username")}, me)
+            if r.get("error"):
+                tg_send(cid, "❌ " + r["error"])
+            return
+        if action == "DELETE":
+            title = parsed.get("title") or _extract_title(text.lower())
+            if title:
+                res = _tool_search_my_list(cid, {"query": title, "type": parsed.get("media_type", "ANIME")}, me)
+                hits = res.get("results") or []
+                if hits:
+                    h = hits[0]
+                    _tool_delete_entry(cid, {"entry_id": h["entry_id"], "media_id": h.get("media_id"), "title": h.get("title")}, me)
+                else:
+                    tg_send(cid, "❌ " + res.get("error", "ما لقيته في قائمتك."))
             else:
-                self._suggest(cid, raw)
+                tg_send(cid, "❌ حدد الأنمي للحذف. مثال: <i>احذف ناروتو</i>")
+            return
+        if action == "TRACK":
+            title = parsed.get("title") or _extract_title(text.lower())
+            if not title:
+                self._suggest(cid, text)
                 return
-        mt = p.get("media_type", "ANIME")
-        candidates = search_media(title, mt)
-        if not candidates:
-            tg_send(
-                cid,
-                f"❌ ما لقيت نتائج لـ: <b>{title}</b>\nجرّب الاسم بالإنجليزي أو الياباني.",
-            )
-            return
-        part_hint = p.get("part_hint")
-        # season resolution
-        if part_hint and not p.get("media_id"):
-            base = candidates[0]
-            parts = resolve_franchise_parts(base["id"])
-            if part_hint == "latest":
-                chosen = pick_latest_part(parts) or base
-            else:
-                try:
-                    chosen = (
-                        pick_nth_part(parts, int(part_hint))
-                        or pick_latest_part(parts)
-                        or base
-                    )
-                except Exception:
-                    chosen = pick_latest_part(parts) or base
-            self._do_track(cid, chosen, p)
-            return
-        # disambiguation on low confidence + multiple
-        if (
-            len(candidates) > 1
-            and p.get("confidence") in ("low", "medium")
-            and not part_hint
-        ):
-            self._disambiguate_track(cid, title, candidates, p)
-            return
-        self._do_track(cid, candidates[0], p)
-
-    def _disambiguate_track(self, cid, title, candidates, p):
-        rows = []
-        status = p.get("status") or ""
-        score = p.get("score", "")
-        fav = p.get("is_favorite", False)
-        mt = p.get("media_type", "ANIME")
-        ph = p.get("part_hint", "")
-        for c in candidates[:5]:
-            n = media_label(c)
-            cd = f"pick:{c['id']}:{status}:{score}:{fav}:{mt}:{ph}"
-            rows.append([{"text": n, "callback_data": cd}])
-        tg_send(cid, f"🤔 لقيت عدة نتائج لـ <b>{title}</b>، اختر الصح:", kb_make(rows))
-
-    def _do_track(self, cid, media, p):
-        mid = media["id"]
-        status = p.get("status") or "CURRENT"
-        score = p.get("score")
-        mt = p.get("media_type") or sget(media, "type") or "ANIME"
-        fresh = bool(p.get("fresh_start"))
-        existing = get_entry(mid, ANILIST_TOKEN) if ANILIST_TOKEN else None
-        cur_prog = (existing or {}).get("progress") or 0
-        prev_status = (existing or {}).get("status")
-        prev_score = (existing or {}).get("score")
-        prev_existed = bool(existing)
-        entry_id = (existing or {}).get("id")
-        total = sget(media, "episodes") or sget(media, "chapters") or 0
-        # compute new progress — fresh_start forces absolute semantics on deltas too
-        new_prog = cur_prog
-        if p.get("absolute_progress") is not None:
-            new_prog = int(p["absolute_progress"])
-        elif p.get("progress_delta") is not None:
-            if fresh and prev_existed and cur_prog > 0:
-                # "بدأت ... شفت N" should reset to N, not add to existing
-                new_prog = int(p["progress_delta"])
-            else:
-                new_prog = cur_prog + int(p["progress_delta"])
-        elif status == "COMPLETED" and total > 0:
-            new_prog = total
-        elif status == "COMPLETED":
-            new_prog = None  # leave untouched, AniList keeps existing
-        if new_prog is not None and total and new_prog > total:
-            new_prog = total
-        if new_prog is not None and new_prog < 0:
-            new_prog = 0
-        # save
-        if ANILIST_TOKEN:
-            res = save_entry(
-                mid, ANILIST_TOKEN, status=status, score=score, progress=new_prog
-            )
-            if isinstance(res, dict) and res.get("error"):
-                tg_send(cid, f"⚠️ خطأ من AniList: {res['error'][:200]}")
+            res = _tool_search_anime(cid, {"query": title, "type": parsed.get("media_type", "ANIME")}, me)
+            hits = res.get("results") or []
+            if not hits:
+                tg_send(cid, "❌ " + res.get("error", "ما لقيت الأنمي."))
                 return
-            new_entry_id = sget(res, "id") or entry_id
-            if p.get("is_favorite"):
-                try:
-                    toggle_fav(mid, ANILIST_TOKEN, mt)
-                except Exception:
-                    pass
-            # store last action for UNDO
-            set_last_action(
+            base = hits[0]
+            _tool_track_media(
                 cid,
                 {
-                    "type": "save",
-                    "media_id": mid,
-                    "entry_id": new_entry_id,
-                    "media_title": title_of(media),
-                    "media_type": mt,
-                    "prev_existed": prev_existed,
-                    "prev_progress": cur_prog,
-                    "prev_status": prev_status,
-                    "prev_score": prev_score,
+                    "media_id": base["id"],
+                    "status": parsed.get("status") or "CURRENT",
+                    "progress": parsed.get("absolute_progress"),
+                    "progress_delta": parsed.get("progress_delta"),
+                    "fresh_start": parsed.get("fresh_start", False),
+                    "score": parsed.get("score"),
+                    "favorite": parsed.get("is_favorite", False),
+                    "type": parsed.get("media_type", "ANIME"),
+                    "part": parsed.get("part_hint"),
                 },
+                me,
             )
-        name = title_of(media)
-        unit = "الفصل" if mt == "MANGA" else "الحلقة"
-        cap = f"✅ <b>تم التحديث!</b>\n\n📺 <b>{name}</b>"
-        yr = sget(media, "seasonYear")
-        if yr:
-            cap += f"  ({yr})"
-        cap += f"\n📌 {status_ar(status)}"
-        if new_prog is not None:
-            cap += f"\n🔢 {unit}: <b>{new_prog}</b>"
-            if total:
-                cap += f"/{total}"
-        if score is not None:
-            cap += f"\n⭐ التقييم: {score}/10"
-        if p.get("is_favorite"):
-            cap += "\n❤️ أضيف للمفضلة!"
-        trailer = sget(media, "trailer")
-        if trailer and sget(trailer, "site") == "youtube" and sget(trailer, "id"):
-            cap += f"\n🎬 <a href='https://youtube.com/watch?v={trailer['id']}'>العرض الدعائي</a>"
-        kb = kb_make(
-            [
-                [
-                    {
-                        "text": "🔗 AniList",
-                        "url": sget(media, "siteUrl") or "https://anilist.co",
-                    }
-                ]
-            ]
-        )
-        tg_photo(cid, cover_of(media), cap, kb)
-        save_context(
-            cid,
-            "bot",
-            f"حدثّت {name} - {unit} {new_prog}",
-            extra={
-                "media_title": name,
-                "media_id": mid,
-                "action": "TRACK",
-                "progress": new_prog,
-            },
-        )
-
-    # ---------- CORRECT (correction of last track) ----------
-    def _correct(self, cid, p):
-        last = self._last_track_extra(cid)
-        corrected = p.get("corrected_progress")
-        if corrected is None:
-            corrected = p.get("absolute_progress")
-        if corrected is None:
-            corrected = _extract_corrected_progress(p.get("original_text", "") or "")
-        part_hint = p.get("part_hint")
-        # derive a part number from a bare ordinal (الرابع/الثالث...) if none detected
-        if part_hint is None:
-            low_txt = (p.get("original_text", "") or "").lower()
-            for _ord, _n in _AR_ORDINALS.items():
-                if _ord in low_txt:
-                    part_hint = _n
-                    break
-        # part correction
-        if (part_hint or p.get("title")) and last:
-            base_title = p.get("title") or last.get("media_title")
-            cands = search_media(base_title, last.get("media_type", "ANIME"))
-            if cands:
-                base = cands[0]
-                parts = resolve_franchise_parts(base["id"])
-                if part_hint == "latest":
-                    chosen = pick_latest_part(parts) or base
-                elif part_hint:
-                    try:
-                        chosen = (
-                            pick_nth_part(parts, int(part_hint))
-                            or pick_latest_part(parts)
-                            or base
-                        )
-                    except Exception:
-                        chosen = pick_latest_part(parts) or base
-                else:
-                    chosen = base
-                # if picking a different part, re-track fresh
-                if chosen.get("id") != last.get("media_id"):
-                    tg_send(
-                        cid, f"👌 فهمت، أتبع الجزء الصحيح: <b>{title_of(chosen)}</b>"
-                    )
-                    self._do_track(
-                        cid,
-                        chosen,
-                        {
-                            "status": "CURRENT",
-                            "media_type": sget(chosen, "type", "ANIME"),
-                            "absolute_progress": corrected,
-                            "fresh_start": True,
-                        },
-                    )
-                    return
-        # progress correction
-        if corrected is not None and last:
-            name = last.get("media_title")
-            preview = {
-                "title": name,
-                "absolute_progress": int(corrected),
-                "status": "CURRENT",
-                "media_type": last.get("media_type", "ANIME"),
-                "fresh_start": True,
-            }
-            cap = (
-                f"👌 سأعدّل <b>{name}</b> وأخلي التقدم <b>{int(corrected)}</b> بدل اللي سجلته.\n"
-                f"أكّد بكلمة <b>نعم</b> (خلال ٥ دقايق)."
-            )
-            set_pending(cid, preview)
-            kb = kb_make(
-                [
-                    [
-                        {"text": "✅ تأكيد", "callback_data": "pend:yes"},
-                        {"text": "❌ إلغاء", "callback_data": "pend:no"},
-                    ],
-                ]
-            )
-            tg_send(cid, cap, kb)
             return
-        # correction without resolvable target
+
+        # CHAT / unknown
         tg_send(
             cid,
-            "🤔 ما قدرت أفهم التصحيح زين. اكتب لي المطلوب بوضوح، مثلاً:\n"
-            "<i>صحّح التقدم إلى حلقة 2</i> أو <i>كنت اقصد الجزء الرابع من ري زيرو</i>.",
-        )
-
-    # ---------- UNDO ----------
-    def _undo(self, cid, p):
-        last = get_last_action(cid)
-        if not last:
-            tg_send(cid, "📭 ما في إجراء سابق أقدر أرجّعه.")
-            return
-        if not ANILIST_TOKEN:
-            tg_send(cid, "❌ ما عندي صلاحية AniList.")
-            return
-        if last.get("type") == "save":
-            mid = last["media_id"]
-            if not last.get("prev_existed"):
-                # it was newly added → delete it
-                ok = delete_entry(last.get("entry_id"), ANILIST_TOKEN)
-                msg = "↩️ رجّعت الإضافة (حذفت الإدخال)." if ok else "❌ ما قدرت أرجّع."
-            else:
-                res = save_entry(
-                    mid,
-                    ANILIST_TOKEN,
-                    status=last.get("prev_status"),
-                    score=last.get("prev_score"),
-                    progress=last.get("prev_progress"),
-                )
-                msg = (
-                    f"↩️ رجّعت <b>{last.get('media_title')}</b> للتقدم السابق."
-                    if not (isinstance(res, dict) and res.get("error"))
-                    else f"❌ خطأ: {res.get('error', '')}"
-                )
-        elif last.get("type") == "delete":
-            res = save_entry(
-                last["media_id"],
-                ANILIST_TOKEN,
-                status=last.get("prev_status") or "CURRENT",
-                score=last.get("prev_score"),
-                progress=last.get("prev_progress"),
-            )
-            msg = (
-                f"↩️ رجّعت <b>{last.get('media_title')}</b> لقائمتك."
-                if not (isinstance(res, dict) and res.get("error"))
-                else f"❌ خطأ: {res.get('error', '')}"
-            )
-        else:
-            msg = "❌ ما أقدر أرجّع هذا الإجراء."
-        store_del(f"last:{cid}")
-        tg_send(cid, msg)
-        save_context(cid, "bot", "تراجع عن آخر إجراء")
-
-    # ---------- DELETE ----------
-    def _delete(self, cid, p):
-        title = p.get("title")
-        if not title:
-            tg_send(cid, "❌ حدد الأنمي للحذف. مثال: <i>احذف ناروتو</i>")
-            return
-        cands = search_media(title, p.get("media_type", "ANIME"))
-        if not cands:
-            tg_send(cid, f"❌ ما لقيت: <b>{title}</b>")
-            return
-        media = cands[0]
-        mid = media["id"]
-        entry = get_entry(mid, ANILIST_TOKEN) if ANILIST_TOKEN else None
-        if not entry:
-            tg_send(cid, f"❌ <b>{title_of(media)}</b> أصلاً مو بقائمتك.")
-            return
-        eid = entry["id"]
-        name = title_of(media)
-        cap = f"🗑️ تأكد تبي تحذف <b>{name}</b> من قائمتك؟"
-        kb = kb_make(
-            [
-                [
-                    {"text": "✅ تأكيد الحذف", "callback_data": f"del:{eid}:{mid}"},
-                    {"text": "❌ إلغاء", "callback_data": "cancel"},
-                ],
-            ]
-        )
-        tg_photo(cid, cover_of(media), cap, kb)
-        save_context(
-            cid,
-            "bot",
-            f"طلب حذف {name}",
-            extra={"media_title": name, "media_id": mid, "action": "DELETE"},
-        )
-
-    # ---------- STATS ----------
-    def _stats(self, cid, p):
-        fn = p.get("friend_username")
-        if not fn:
-            viewer = get_viewer(ANILIST_TOKEN) if ANILIST_TOKEN else None
-            if not viewer:
-                tg_send(cid, "❌ ما قدرت أجيب حسابك. تأكد من ربط AniList.")
-                return
-            fn = viewer["name"]
-        stats = get_stats(fn)
-        if not stats:
-            tg_send(cid, "❌ ما لقيت إحصائيات.")
-            return
-        a = stats.get("anime") or {}
-        m = stats.get("manga") or {}
-        mins = a.get("minutesWatched", 0) or 0
-        days = mins // 1440
-        hours = (mins % 1440) // 60
-        genres = a.get("genres") or []
-        studios = a.get("studios") or []
-        top_genres = ", ".join([g.get("genre", "") for g in genres[:3]]) or "—"
-        top_studios = ", ".join([sget(s, "studio", "name") for s in studios[:3]]) or "—"
-        cap = (
-            f"📊 <b>إحصائيات {fn}</b>\n\n"
-            f"📺 <b>الأنمي:</b>\n"
-            f"  • العدد: {a.get('count', 0)}\n"
-            f"  • الحلقات: {a.get('episodesWatched', 0)}\n"
-            f"  • وقت المشاهدة: {days} يوم و {hours} ساعة\n"
-            f"  • متوسط التقييم: {a.get('meanScore', 0)}/100\n"
-            f"  • الأنواع المفضلة: {top_genres}\n"
-            f"  • الاستديوهات المفضلة: {top_studios}\n\n"
-            f"📖 <b>المانجا:</b>\n"
-            f"  • العدد: {m.get('count', 0)}\n"
-            f"  • الفصول: {m.get('chaptersRead', 0)}\n"
-            f"  • متوسط التقييم: {m.get('meanScore', 0)}/100"
-        )
-        tg_send(cid, cap)
-        save_context(cid, "bot", f"عرضت إحصائيات {fn}")
-
-    # ---------- ACTIVITY ----------
-    def _activity(self, cid, p):
-        viewer = get_viewer(ANILIST_TOKEN) if ANILIST_TOKEN else None
-        if not viewer:
-            tg_send(cid, "❌ ما قدرت أجيب حسابك.")
-            return
-        acts = get_activities(viewer["id"])
-        if not acts:
-            tg_send(cid, "ما في نشاطات حديثة.")
-            return
-        items = []
-        for act in acts[:8]:
-            media = act.get("media") or {}
-            if not media:
-                continue
-            name = title_of(media)
-            st = act.get("status", "") or ""
-            prog = act.get("progress", "") or ""
-            cap = f"<b>{name}</b>\n{status_ar(st) if st in STATUS_AR else st}"
-            if prog:
-                cap += f" {prog}"
-            url = cover_of(media)
-            if url:
-                items.append({"url": url, "caption": cap})
-        if items:
-            tg_album(cid, items)
-        else:
-            tg_send(cid, "ما في نشاطات فيها صور.")
-        save_context(cid, "bot", "عرضت آخر النشاطات")
-
-    # ---------- MY LIST ----------
-    def _mylist(self, cid, p):
-        viewer = get_viewer(ANILIST_TOKEN) if ANILIST_TOKEN else None
-        if not viewer:
-            tg_send(cid, "❌ ما قدرت أجيب حسابك.")
-            return
-        status = p.get("status")
-        mt = p.get("media_type", "ANIME")
-        sort = ["UPDATED_TIME_DESC"]
-        if status == "COMPLETED":
-            sort = ["SCORE_DESC", "UPDATED_TIME_DESC"]
-        entries = get_media_list(
-            username=viewer["name"], media_type=mt, status=status, sort=sort, per_page=8
-        )
-        if not entries:
-            tg_send(cid, "قائمتك فاضية بهذا الفلتر.")
-            return
-        items = []
-        for e in entries[:8]:
-            media = e.get("media") or {}
-            name = title_of(media)
-            sc = e.get("score", 0)
-            prog = e.get("progress")
-            cap = f"<b>{name}</b>"
-            if prog:
-                cap += f" — {prog} حلقة"
-            if sc:
-                cap += f" | ⭐ {sc}"
-            url = cover_of(media)
-            if url:
-                items.append({"url": url, "caption": cap})
-        if items:
-            tg_album(cid, items)
-        else:
-            tg_send(cid, "ما في نتائج فيها صور.")
-
-    # ---------- FRIEND ----------
-    def _friend_profile(self, cid, p):
-        fn = p.get("friend_username")
-        if not fn:
-            self._my_following(cid, p)
-            return
-        user = get_profile(fn)
-        if not user:
-            tg_send(cid, f"❌ ما لقيت مستخدم: {fn}")
-            return
-        a = sget(user, "statistics", "anime") or {}
-        m = sget(user, "statistics", "manga") or {}
-        cap = (
-            f"👤 <b>{user.get('name')}</b>\n\n"
-            f"📺 أنمي: {a.get('count', 0)} | حلقات: {a.get('episodesWatched', 0)}\n"
-            f"📖 مانجا: {m.get('count', 0)} | فصول: {m.get('chaptersRead', 0)}\n"
-            f"⭐ متوسط تقييم الأنمي: {a.get('meanScore', 0)}/100"
-        )
-        kb = kb_make(
-            [
-                [
-                    {
-                        "text": "🔗 AniList",
-                        "url": user.get("siteUrl") or "https://anilist.co",
-                    }
-                ]
-            ]
-        )
-        tg_photo(cid, sget(user, "avatar", "large"), cap, kb)
-
-    def _my_following(self, cid, p):
-        viewer = get_viewer(ANILIST_TOKEN) if ANILIST_TOKEN else None
-        if not viewer:
-            tg_send(cid, "❌ ما قدرت أجيب حسابك.")
-            return
-        following = get_following(viewer["id"])
-        if not following:
-            tg_send(cid, "👥 ما تتابع أحد حالياً على AniList.")
-            return
-        cap = f"👥 <b>قائمة متابعينك ({len(following)}):</b>\n\n"
-        for u in following:
-            name = u.get("name", "—")
-            a = (u.get("statistics") or {}).get("anime") or {}
-            cap += f"• <b>{name}</b> — {a.get('count', 0)} أنمي | ⭐ {a.get('meanScore', 0)}\n"
-        tg_send(cid, cap)
-        save_context(cid, "bot", "عرضت قائمة المتابعين")
-
-    def _friend_list(self, cid, p):
-        fn = p.get("friend_username")
-        if not fn:
-            # "قائمة أصدقائي" → show following
-            self._my_following(cid, p)
-            return
-        entries = get_media_list(username=fn, per_page=8)
-        if not entries:
-            tg_send(cid, f"ما في نتائج لـ {fn}.")
-            return
-        items = []
-        for e in entries[:8]:
-            media = e.get("media") or {}
-            name = title_of(media)
-            sc = e.get("score", 0)
-            cap = f"<b>{name}</b>" + (f"\n⭐ {sc}" if sc else "")
-            url = cover_of(media)
-            if url:
-                items.append({"url": url, "caption": cap})
-        if items:
-            tg_album(cid, items)
-
-    def _friend_activity(self, cid, p):
-        fn = p.get("friend_username")
-        if not fn:
-            tg_send(cid, "❌ حدد اسم المستخدم.")
-            return
-        user = get_profile(fn)
-        if not user:
-            tg_send(cid, f"❌ ما لقيت: {fn}")
-            return
-        acts = get_activities(user["id"])
-        if not acts:
-            tg_send(cid, f"ما في نشاطات حديثة لـ {fn}.")
-            return
-        items = []
-        for act in acts[:8]:
-            media = act.get("media") or {}
-            if not media:
-                continue
-            cap = f"<b>{title_of(media)}</b>\n{act.get('status', '')} {act.get('progress', '')}"
-            url = cover_of(media)
-            if url:
-                items.append({"url": url, "caption": cap})
-        if items:
-            tg_album(cid, items)
-
-    # ---------- COMPARE ----------
-    def _compare(self, cid, p):
-        fn = p.get("friend_username")
-        if not fn:
-            tg_send(cid, "❌ حدد اسم صديقك للمقارنة.")
-            return
-        viewer = get_viewer(ANILIST_TOKEN) if ANILIST_TOKEN else None
-        if not viewer:
-            tg_send(cid, "❌ ما قدرت أجيب حسابك.")
-            return
-        my_list = get_media_list(
-            username=viewer["name"], status="COMPLETED", per_page=50
-        )
-        fr_list = get_media_list(username=fn, status="COMPLETED", per_page=50)
-        my_ids = {e["media"]["id"]: e for e in my_list if sget(e, "media")}
-        fr_ids = {e["media"]["id"]: e for e in fr_list if sget(e, "media")}
-        shared = set(my_ids) & set(fr_ids)
-        only_me = set(my_ids) - set(fr_ids)
-        only_fr = set(fr_ids) - set(my_ids)
-        cap = (
-            f"🆚 <b>مقارنة: {viewer['name']} vs {fn}</b>\n\n"
-            f"🤝 مشترك: {len(shared)} أنمي\n"
-            f"👤 عندك فقط: {len(only_me)} أنمي\n"
-            f"👥 عند {fn} فقط: {len(only_fr)} أنمي\n"
-        )
-        if shared:
-            cap += "\n<b>تقييمات مشتركة:</b>\n"
-            for sid in list(shared)[:6]:
-                e = my_ids.get(sid) or {}
-                name = title_of(e.get("media") or {})
-                ms = e.get("score", 0)
-                fs = (fr_ids.get(sid) or {}).get("score", 0)
-                cap += f"• {name}: أنت {ms} | {fn} {fs}\n"
-        tg_send(cid, cap)
-
-    # ---------- RECOMMENDATIONS ----------
-    def _rec_genre(self, cid, p):
-        genre = p.get("genre", "Action")
-        trending = get_trending(10)
-        filtered = (
-            [
-                t
-                for t in trending
-                if genre.lower() in [g.lower() for g in (t.get("genres") or [])]
-            ]
-            if trending
-            else []
-        )
-        results = filtered if filtered else trending[:6]
-        if not results:
-            tg_send(cid, f"❌ ما في اقتراحات لتصنيف {genre}")
-            return
-        items = [
-            {
-                "url": cover_of(r),
-                "caption": f"<b>{title_of(r)}</b>\n⭐ {r.get('averageScore', 0)}%",
-            }
-            for r in results[:6]
-            if cover_of(r)
-        ]
-        if items:
-            tg_album(cid, items)
-        else:
-            tg_send(cid, "ما في نتائج فيها صور.")
-
-    def _rec_similar(self, cid, p):
-        title = p.get("title")
-        if not title:
-            tg_send(cid, "❌ حدد الأنمي لإيجاد أنمي مشابه.")
-            return
-        cands = search_media(title)
-        if not cands:
-            tg_send(cid, f"❌ ما لقيت: {title}")
-            return
-        recs = get_recommendations(cands[0]["id"])
-        if not recs:
-            tg_send(cid, f"❌ ما في توصيات مشابهة لـ <b>{title}</b>")
-            return
-        items = [
-            {
-                "url": cover_of(r),
-                "caption": f"<b>{title_of(r)}</b>\n⭐ {r.get('averageScore', 0)}%",
-            }
-            for r in recs[:6]
-            if cover_of(r)
-        ]
-        if items:
-            tg_album(cid, items)
-
-    def _rec_from_list(self, cid, p):
-        viewer = get_viewer(ANILIST_TOKEN) if ANILIST_TOKEN else None
-        if not viewer:
-            tg_send(cid, "❌ ما قدرت أجيب حسابك.")
-            return
-        entries = get_media_list(
-            username=viewer["name"], status="COMPLETED", sort=["SCORE_DESC"], per_page=8
-        )
-        if not entries:
-            tg_send(cid, "قائمتك المكتملة فاضية.")
-            return
-        items = [
-            {
-                "url": cover_of(e.get("media")),
-                "caption": f"<b>{title_of(e.get('media'))}</b>\n⭐ {e.get('score', 0)}",
-            }
-            for e in entries
-            if sget(e, "media") and cover_of(e["media"])
-        ]
-        if items:
-            tg_album(cid, items[:8])
-
-    # ---------- TRENDING / SEASONAL / TOP ----------
-    def _trending(self, cid, p):
-        results = get_trending(8)
-        if not results:
-            tg_send(cid, "❌ ما قدرت أجيب الترند.")
-            return
-        items = [
-            {
-                "url": cover_of(r),
-                "caption": f"<b>{title_of(r)}</b>\n⭐ {r.get('averageScore', 0)}%",
-            }
-            for r in results
-            if cover_of(r)
-        ]
-        if items:
-            tg_album(cid, items)
-        save_context(cid, "bot", "عرضت الترند")
-
-    def _seasonal(self, cid, p):
-        s, y = current_season()
-        results = get_seasonal(s, y, 8)
-        if not results:
-            tg_send(cid, f"❌ ما في أنميات لموسم {s} {y}")
-            return
-        items = [
-            {
-                "url": cover_of(r),
-                "caption": f"<b>{title_of(r)}</b>\n⭐ {r.get('averageScore', 0)}%",
-            }
-            for r in results
-            if cover_of(r)
-        ]
-        if items:
-            tg_album(cid, items)
-
-    def _top_rated(self, cid, p):
-        q = """query{Page(perPage:8){media(type:ANIME,sort:SCORE_DESC){
-        id title{romaji english} coverImage{large} averageScore siteUrl}}}"""
-        res = _gql(q)
-        media_list = sget(res, "data", "Page", "media", default=[]) or []
-        items = [
-            {
-                "url": cover_of(m),
-                "caption": f"<b>{title_of(m)}</b>\n⭐ {m.get('averageScore', 0)}%",
-            }
-            for m in media_list
-            if cover_of(m)
-        ]
-        if items:
-            tg_album(cid, items)
-        else:
-            tg_send(cid, "❌ فشل جلب الأعلى تقييماً.")
-
-    def _random_anime(self, cid, p):
-        genre = p.get("genre") or random.choice(
-            [
-                "Action",
-                "Adventure",
-                "Comedy",
-                "Drama",
-                "Fantasy",
-                "Mystery",
-                "Romance",
-                "Sci-Fi",
-            ]
-        )
-        page = random.randint(1, 10)
-        q = """query($g:String,$p:Int){Page(page:$p,perPage:1){media(type:ANIME,genre:$g,sort:POPULARITY_DESC){
-        id title{romaji english} coverImage{large} averageScore siteUrl episodes}}}"""
-        res = _gql(q, {"g": genre, "p": page})
-        media_list = sget(res, "data", "Page", "media", default=[]) or []
-        if not media_list:
-            tg_send(cid, "❌ ما لقيت أنمي عشوائي. جرّب مرة ثانية!")
-            return
-        m = media_list[0]
-        cap = f"🎲 <b>أنمي عشوائي ({genre}):</b>\n\n<b>{title_of(m)}</b>\n⭐ {m.get('averageScore', 0)}%\n📺 {m.get('episodes', '?')} حلقة"
-        kb = kb_make(
-            [
-                [
-                    {
-                        "text": "🔗 AniList",
-                        "url": m.get("siteUrl") or "https://anilist.co",
-                    },
-                    {
-                        "text": "➕ تابع",
-                        "callback_data": f"pick:{m['id']}:CURRENT::False:ANIME:",
-                    },
-                ]
-            ]
-        )
-        tg_photo(cid, cover_of(m), cap, kb)
-
-    # ---------- CHARACTER / STAFF / STUDIO ----------
-    def _character(self, cid, p):
-        name = p.get("title")
-        if not name:
-            tg_send(cid, "❌ حدد اسم الشخصية.")
-            return
-        ch = search_character_q(name)
-        if not ch:
-            tg_send(cid, f"❌ ما لقيت شخصية: {name}")
-            return
-        full = sget(ch, "name", "full") or name
-        native = sget(ch, "name", "native") or ""
-        anime = "غير محدد"
-        nodes = sget(ch, "media", "nodes") or []
-        if nodes:
-            anime = title_of(nodes[0])
-        cap = (
-            f"👤 <b>{full}</b>"
-            + (f" ({native})" if native else "")
-            + f"\n\n📺 من: <b>{anime}</b>"
-        )
-        kb = kb_make(
-            [[{"text": "🔗 AniList", "url": ch.get("siteUrl") or "https://anilist.co"}]]
-        )
-        tg_photo(cid, sget(ch, "image", "large"), cap, kb)
-
-    def _staff(self, cid, p):
-        name = p.get("title")
-        if not name:
-            tg_send(cid, "❌ حدد اسم الشخص.")
-            return
-        st = search_staff_q(name)
-        if not st:
-            tg_send(cid, f"❌ ما لقيت: {name}")
-            return
-        full = sget(st, "name", "full") or name
-        native = sget(st, "name", "native") or ""
-        jobs = ", ".join((st.get("primaryOccupations") or [])[:3]) or "—"
-        chars = (
-            ", ".join(
-                [
-                    sget(c, "name", "full")
-                    for c in (sget(st, "characters", "nodes") or [])[:3]
-                ]
-            )
-            or "—"
-        )
-        cap = (
-            f"🎙️ <b>{full}</b>"
-            + (f" ({native})" if native else "")
-            + f"\n\n💼 المهنة: {jobs}\n🎭 شخصيات: {chars}"
-        )
-        tg_photo(cid, sget(st, "image", "large"), cap)
-
-    def _studio(self, cid, p):
-        name = p.get("title")
-        if not name:
-            tg_send(cid, "❌ حدد اسم الاستديو.")
-            return
-        studio = search_studio_q(name)
-        if not studio:
-            tg_send(cid, f"❌ ما لقيت استديو: {name}")
-            return
-        works = sget(studio, "media", "nodes") or []
-        if not works:
-            tg_send(cid, f"ما في أعمال لاستديو {studio.get('name')}")
-            return
-        items = [
-            {
-                "url": cover_of(w),
-                "caption": f"<b>{title_of(w)}</b>\n⭐ {w.get('averageScore', 0)}%",
-            }
-            for w in works[:8]
-            if cover_of(w)
-        ]
-        if items:
-            tg_send(cid, f"🏢 <b>أعمال {studio.get('name')}:</b>")
-            tg_album(cid, items)
-
-    # ---------- RELATIONS ----------
-    def _relations(self, cid, p):
-        title = p.get("title")
-        if not title:
-            tg_send(cid, "❌ حدد الأنمي.")
-            return
-        cands = search_media(title)
-        if not cands:
-            tg_send(cid, f"❌ ما لقيت: {title}")
-            return
-        edges = get_relations(cands[0]["id"])
-        if not edges:
-            tg_send(cid, f"❌ ما في علاقات لـ <b>{title}</b>")
-            return
-        TYPE_AR = {
-            "SEQUEL": "تتمة",
-            "PREQUEL": "جزء سابق",
-            "SIDE_STORY": "قصة جانبية",
-            "ADAPTATION": "اقتباس",
-            "SPIN_OFF": "سبن أوف",
-            "PARENT": "العمل الأصل",
-            "CHARACTER": "شخصية مشتركة",
-            "SUMMARY": "ملخص",
-            "ALTERNATIVE": "بديل",
-            "OTHER": "أخرى",
-            "CONTAINS": "يحتوي",
-            "COMPILATION": "تجميع",
-        }
-        items = []
-        for e in edges[:8]:
-            node = e.get("node") or {}
-            rel = TYPE_AR.get(e.get("relationType", ""), e.get("relationType", ""))
-            cap = f"<b>{title_of(node)}</b>\n🔗 {rel}"
-            url = cover_of(node)
-            if url:
-                items.append({"url": url, "caption": cap})
-        if items:
-            tg_album(cid, items)
-
-    # ---------- AIRING ----------
-    def _airing(self, cid, p):
-        title = p.get("title")
-        if not title:
-            tg_send(cid, "❌ حدد الأنمي.")
-            return
-        cands = search_media(title)
-        if not cands:
-            tg_send(cid, f"❌ ما لقيت: {title}")
-            return
-        media = cands[0]
-        schedule = get_airing(media["id"])
-        if not schedule:
-            tg_send(cid, f"📺 <b>{title_of(media)}</b> منتهي أو غير مجدول حالياً.")
-            return
-        secs = schedule.get("timeUntilAiring", 0) or 0
-        ep = schedule.get("episode", "?")
-        days = secs // 86400
-        hours = (secs % 86400) // 3600
-        mins = (secs % 3600) // 60
-        parts = []
-        if days:
-            parts.append(f"{days} يوم")
-        if hours:
-            parts.append(f"{hours} ساعة")
-        if mins:
-            parts.append(f"{mins} دقيقة")
-        countdown = " و ".join(parts) or "أقل من دقيقة"
-        cap = f"📺 <b>{title_of(media)}</b>\n\n⏱️ الحلقة {ep} بعد: <b>{countdown}</b>"
-        tg_photo(cid, cover_of(media), cap)
-
-    # ---------- FAVORITES ----------
-    def _fav_list(self, cid, p):
-        viewer = get_viewer(ANILIST_TOKEN) if ANILIST_TOKEN else None
-        if not viewer:
-            tg_send(cid, "❌ ما قدرت أجيب حسابك.")
-            return
-        anime_favs, manga_favs = get_favorites(viewer["name"])
-        all_favs = (anime_favs or []) + (manga_favs or [])
-        if not all_favs:
-            tg_send(cid, "قائمة مفضلاتك فاضية.")
-            return
-        items = [
-            {"url": cover_of(f), "caption": f"<b>{title_of(f)}</b> ❤️"}
-            for f in all_favs[:8]
-            if cover_of(f)
-        ]
-        if items:
-            tg_album(cid, items)
-
-    def _fav_add(self, cid, p):
-        title = p.get("title")
-        if not title:
-            tg_send(cid, "❌ حدد الأنمي.")
-            return
-        cands = search_media(title)
-        if not cands:
-            tg_send(cid, f"❌ ما لقيت: {title}")
-            return
-        media = cands[0]
-        if ANILIST_TOKEN:
-            try:
-                toggle_fav(media["id"], ANILIST_TOKEN, p.get("media_type", "ANIME"))
-            except Exception:
-                pass
-        tg_photo(
-            cid, cover_of(media), f"❤️ بدّلت حالة المفضلة لـ <b>{title_of(media)}</b>"
-        )
-
-    def _fav_remove(self, cid, p):
-        self._fav_add(cid, p)
-
-    # ---------- BATCH ----------
-    def _batch(self, cid, p):
-        batch = p.get("batch") or []
-        if not batch:
-            tg_send(cid, "❌ ما لقيت عناصر للتحديث.")
-            return
-        items = []
-        for entry in batch[:5]:
-            title = entry.get("title")
-            if not title:
-                continue
-            cands = search_media(title)
-            if not cands:
-                continue
-            media = cands[0]
-            mid = media["id"]
-            status = entry.get("status", "COMPLETED")
-            score = entry.get("score")
-            total = sget(media, "episodes") or sget(media, "chapters") or 0
-            prog = (
-                total
-                if status == "COMPLETED" and total > 0
-                else entry.get("progress_delta")
-            )
-            if ANILIST_TOKEN:
-                save_entry(
-                    mid, ANILIST_TOKEN, status=status, score=score, progress=prog
-                )
-            name = title_of(media)
-            cap = f"<b>{name}</b> ✅\n{status_ar(status)}"
-            if score:
-                cap += f" | ⭐ {score}"
-            url = cover_of(media)
-            if url:
-                items.append({"url": url, "caption": cap})
-        if items:
-            tg_send(cid, f"✅ حدّثت {len(items)} عنصر:")
-            tg_album(cid, items)
-        else:
-            tg_send(cid, "❌ فشل تحديث العناصر.")
-
-    # ---------- SURPRISE ----------
-    def _surprise(self, cid, p):
-        mode = random.choice(["rec", "flashback", "stat", "random"])
-        viewer = get_viewer(ANILIST_TOKEN) if ANILIST_TOKEN else None
-        if mode == "flashback" and viewer:
-            entries = get_media_list(
-                username=viewer["name"], status="COMPLETED", per_page=50
-            )
-            if entries:
-                e = random.choice(entries)
-                media = e.get("media") or {}
-                sc = e.get("score", 0)
-                cap = f"💭 <b>فلاش باك!</b>\n\n<b>{title_of(media)}</b>\nقيّمته: ⭐ {sc}/10\n\nتتذكره؟ 🤔"
-                tg_photo(cid, cover_of(media), cap)
-                return
-        if mode == "stat" and viewer:
-            stats = get_stats(viewer["name"])
-            if stats:
-                a = stats.get("anime") or {}
-                mins = a.get("minutesWatched", 0) or 0
-                eps = a.get("episodesWatched", 0) or 0
-                days = mins // 1440
-                tg_send(
-                    cid,
-                    f"🤯 <b>هل تعلم؟</b>\n\nشفت <b>{eps}</b> حلقة أنمي!\nهذا يعادل <b>{days} يوم</b> متواصل مشاهدة! 📺",
-                )
-                return
-        if mode == "rec":
-            trending = get_trending(10)
-            if trending:
-                pick = random.choice(trending)
-                cap = f"🔥 <b>جرّب هذا!</b>\n\n<b>{title_of(pick)}</b>\n⭐ {pick.get('averageScore', 0)}%\n\nأنمي ترند الحين!"
-                kb = kb_make(
-                    [
-                        [
-                            {
-                                "text": "🔗 AniList",
-                                "url": pick.get("siteUrl") or "https://anilist.co",
-                            }
-                        ]
-                    ]
-                )
-                tg_photo(cid, cover_of(pick), cap, kb)
-                return
-        self._random_anime(cid, p)
-
-    # ---------- NEWS ----------
-    def _news(self, cid, p):
-        viewer = get_viewer(ANILIST_TOKEN) if ANILIST_TOKEN else None
-        news_items = []
-        if viewer:
-            current_list = get_media_list(
-                username=viewer["name"], status="CURRENT", per_page=5
-            )
-            for e in current_list[:3]:
-                media = e.get("media") or {}
-                schedule = get_airing(media.get("id"))
-                if schedule:
-                    ep = schedule.get("episode", "?")
-                    secs = schedule.get("timeUntilAiring", 0) or 0
-                    d = secs // 86400
-                    name = title_of(media)
-                    news_items.append(f"📺 <b>{name}</b> — الحلقة {ep} بعد {d} يوم")
-        trending = get_trending(5)
-        for t in trending[:2]:
-            news_items.append(
-                f"🔥 ترند: <b>{title_of(t)}</b> — ⭐ {t.get('averageScore', 0)}%"
-            )
-        if news_items:
-            tg_send(cid, "📰 <b>أخبار أنمياتك:</b>\n\n" + "\n\n".join(news_items))
-        else:
-            tg_send(cid, "ما في أخبار جديدة حالياً.")
-
-    # ---------- CHAT / fallback ----------
-    def _chat(self, cid, p):
-        resp = p.get("chat_response")
-        if not resp or resp.strip() in ("__CONFIRM__", "__CANCEL__"):
-            resp = (
+            (
                 "ما فهمت قصدك زين 🤔\nجرّب صيغة مثل:\n"
                 "• <i>شفت 3 حلقات من ون بيس</i>\n"
                 "• <i>كملت انمي فريرين واقيمه 9</i>\n"
+                "• <i>احذف ناروتو من قائمتي</i>\n"
                 "• <i>وش الترند؟</i>\n"
                 "أو أرسل /help للدليل الكامل."
-            )
-        tg_send(cid, resp)
-        save_context(cid, "bot", resp[:120])
+            ),
+        )
 
     def _suggest(self, cid, raw):
-        """Friendly fallback when no title could be resolved."""
         tg_send(
             cid,
             (
@@ -2516,151 +2382,41 @@ class handler(BaseHTTPRequestHandler):
             ),
         )
 
-    # ---------- CALLBACKS ----------
+    # ---------- Callbacks (v4 mostly uses URL links; legacy-safe stub) ----------
     def _on_callback(self, cb):
-        data = cb.get("data", "") or ""
+        cbid = cb.get("id")
         cid = str(sget(cb, "message", "chat", "id") or "")
         mid = sget(cb, "message", "message_id")
-        cbid = cb.get("id")
         try:
-            if cid and cbid:
+            if cbid:
                 tg_answer_cb(cbid, "تمام...")
         except Exception:
             pass
         if not cid:
             return
-        parts = data.split(":")
-        cmd = parts[0] if parts else ""
-        try:
-            if cmd == "del" and len(parts) >= 2:
-                self._cb_delete(cid, mid, parts)
-            elif cmd == "pend":
-                self._cb_pending(cid, mid, parts)
-            elif cmd == "pick" and len(parts) >= 2:
-                self._cb_pick(cid, parts)
-            elif cmd == "cancel":
-                try:
-                    tg_edit(cid, mid, "↩️ تم الإلغاء.", kb=None)
-                except Exception:
-                    pass
-        except Exception as e:
-            import traceback
-
-            traceback.print_exc()
-            try:
-                tg_send(cid, f"⚠️ خطأ في الزر: {str(e)[:120]}")
-            except Exception:
-                pass
-
-    def _cb_delete(self, cid, mid, parts):
-        eid = int(parts[1])
-        media_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
-        # capture prev for undo
-        prev_status = prev_prog = prev_score = None
-        if media_id and ANILIST_TOKEN:
-            ex = get_entry(media_id, ANILIST_TOKEN) or {}
-            prev_status = ex.get("status")
-            prev_prog = ex.get("progress")
-            prev_score = ex.get("score")
-        ok = delete_entry(eid, ANILIST_TOKEN) if ANILIST_TOKEN else False
-        if ok:
-            try:
-                tg_edit(cid, mid, "✅ تم الحذف بنجاح!", kb=None)
-            except Exception:
-                pass
-            if media_id:
-                set_last_action(
-                    cid,
-                    {
-                        "type": "delete",
-                        "media_id": media_id,
-                        "media_title": "",
-                        "prev_status": prev_status,
-                        "prev_progress": prev_prog,
-                        "prev_score": prev_score,
-                    },
-                )
-            tg_send(cid, "♻️ تقدر ترجّعه بكلمة <b>تراجع</b> أو /undo.")
-        else:
-            try:
-                tg_edit(cid, mid, "❌ فشل الحذف. جرّب مرة ثانية.", kb=None)
-            except Exception:
-                tg_send(cid, "❌ فشل الحذف.")
-
-    def _cb_pending(self, cid, mid, parts):
-        pending = get_pending(cid)
-        if not pending:
-            try:
-                tg_edit(cid, mid, "⏳ انتهت صلاحية الطلب، أعد المحاولة.", kb=None)
-            except Exception:
-                pass
-            return
-        clear_pending(cid)
-        if len(parts) > 1 and parts[1] == "no":
+        data = cb.get("data", "") or ""
+        if data.startswith("cancel"):
             try:
                 tg_edit(cid, mid, "↩️ تم الإلغاء.", kb=None)
             except Exception:
                 pass
-            save_context(cid, "bot", "تم الإلغاء")
-            return
-        # confirm
-        try:
-            tg_edit(cid, mid, "⏳ جاري التنفيذ...", kb=None)
-        except Exception:
-            pass
-        self._route(cid, pending)
+        # v4.0 confirmations are textual; legacy del/pend/pick buttons are ignored gracefully.
 
-    def _cb_pick(self, cid, parts):
-        media_id = int(parts[1])
-        status = parts[2] if len(parts) > 2 and parts[2] else "CURRENT"
-        score_str = parts[3] if len(parts) > 3 else ""
-        is_fav = (parts[4] == "True") if len(parts) > 4 else False
-        mt = parts[5] if len(parts) > 5 else "ANIME"
-        ph = parts[6] if len(parts) > 6 else ""
-        score = None
-        try:
-            score = float(score_str) if score_str not in ("", "None") else None
-        except Exception:
-            score = None
-        media = get_media_by_id(media_id)
-        if not media:
-            tg_send(cid, "❌ ما لقيت الأنمي المختار.")
-            return
-        p = {"status": status, "score": score, "is_favorite": is_fav, "media_type": mt}
-        if ph == "latest":
-            parts_map = resolve_franchise_parts(media_id)
-            chosen = pick_latest_part(parts_map) or media
-            self._do_track(cid, chosen, p)
-            return
-        if ph and ph.isdigit():
-            try:
-                parts_map = resolve_franchise_parts(media_id)
-                chosen = (
-                    pick_nth_part(parts_map, int(ph))
-                    or pick_latest_part(parts_map)
-                    or media
-                )
-                self._do_track(cid, chosen, p)
-                return
-            except Exception:
-                pass
-        self._do_track(cid, media, p)
-
-    # ---------- WELCOME & HELP ----------
+    # ---------- Welcome & Help ----------
     def _welcome(self, cid):
         clear_context(cid)
         tg_send(
             cid,
-            """🎬 <b>أهلاً بك في المخلافي — بوت AniList v3.0</b> 🤖
+            """🎬 <b>أهلاً بك في المخلافي — بوت AniList v4.0</b> 🤖
 
-مساعدك الشامل لإدارة قوائم الأنمي والمانجا. أفهم كلامك العادي بالعربي!
+الحين صرت <b>agent ذكي متعدد الخطوات</b> — أفهم سياق محادثتك، وأبحث وأتنفّذ وأرجع لك بقرار.
 
 <b>📌 أمثلة سريعة:</b>
 • <i>بدأت أشوف لورد الغوامض، شفت حلقتين</i>
 • <i>شفت 3 حلقات من ون بيس</i>
 • <i>كملت انمي فريرين وأقيّمه 9</i>
 • <i>شفت الجزء الجديد من ري زيرو</i>
-• <i>احذف ناروتو من قائمتي</i>
+• <i>احذف الكابتن تسوباسا من قائمتي</i> (يدوّر في قائمتك أنت!)
 • <i>وش الترند؟</i> • <i>إحصائياتي</i> • <i>فاجئني!</i>
 
 💡 غلطت في رقم؟ قول <i>صحّح التقدم إلى حلقة 2</i> أو <i>تراجع</i>.
@@ -2671,7 +2427,7 @@ class handler(BaseHTTPRequestHandler):
     def _help(self, cid):
         tg_send(
             cid,
-            """📖 <b>دليل المخلافي الشامل</b>
+            """📖 <b>دليل المخلافي v4.0</b>
 
 <b>📺 تتبع الأنمي/المانجا:</b>
 • <i>بدأت أشوف هجوم العمالقة شفت حلقتين</i> (بداية جديدة = الحلقة 2)
@@ -2681,31 +2437,26 @@ class handler(BaseHTTPRequestHandler):
 • <i>قريت 10 فصول من سولو ليفلينق</i>
 
 <b>♻️ التصحيح والتراجع:</b>
-• <i>صحّح التقدم إلى حلقة 2</i> / <i>كنت اقصد الجزء الرابع</i>
+• <i>لا، كنت اقصد حلقة 2</i> / <i>كنت اقصد الجزء الرابع</i>
 • <i>تراجع</i> أو <i>/undo</i> — يرجّع آخر تعديل/حذف
 
-<b>🗑️ الحذف:</b> <i>احذف ناروتو من قائمتي</i>
+<b>🗑️ الحذف (يدوّر في قائمتك أنت):</b> <i>احذف ناروتو من قائمتي</i>
 
 <b>📊 الإحصائيات:</b> <i>إحصائياتي</i> • <i>إحصائيات Ahmed</i>
 
 <b>📋 القوائم والنشاط:</b>
-• <i>آخر نشاطاتي</i> • <i>انمياتي المكتملة</i> • <i>مفضلاتي</i> • <i>قائمة أصدقائي</i>
+• <i>آخر نشاطاتي</i> • <i>انمياتي المكتملة</i> • <i>قائمة أصدقائي</i>
 
 <b>👥 الأصدقاء:</b> <i>بروفايل Ahmed</i> • <i>قارن قائمتي مع Ahmed</i>
 
-<b>🧠 التوصيات:</b>
-• <i>أنمي مشابه لهجوم العمالقة</i>
-• <i>اقترح لي أنمي أكشن</i> • <i>أنمي عشوائي</i>
+<b>🧠 التوصيات:</b> <i>أنمي مشابه لهجوم العمالقة</i> • <i>فاجئني!</i>
 
 <b>🔥 الترند والمواسم:</b>
 • <i>وش الترند؟</i> • <i>أنميات هذا الموسم</i> • <i>أفضل 10 أنميات</i>
 
 <b>🔍 البحث:</b>
-• <i>مين شخصية لوفي؟</i> • <i>مؤدي صوت إيتشيغو</i>
-• <i>أنميات استديو MAPPA</i> • <i>سيكويل هجوم العمالقة</i>
-• <i>متى الحلقة الجاية من ون بيس</i>
-
-<b>🎲 المرح:</b> <i>فاجئني!</i> • <i>خبر حلو</i>
+• <i>مين شخصية لوفي؟</i> • <i>أنميات استديو MAPPA</i>
+• <i>سيكويل هجوم العمالقة</i> • <i>متى الحلقة الجاية من ون بيس</i>
 
 💡 تقدر تكلمني كلام عادي وبفهمك! 😊""",
         )
