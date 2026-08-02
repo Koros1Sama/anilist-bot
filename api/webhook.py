@@ -239,8 +239,9 @@ def _gql(query, variables=None, token=None, timeout=None):
         "Accept": "application/json",
         "User-Agent": USER_AGENT,
     }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    eff_token = token or ANILIST_TOKEN
+    if eff_token:
+        headers["Authorization"] = f"Bearer {eff_token}"
     data = json.dumps({"query": query, "variables": variables or {}}).encode("utf-8")
     # AniList rate-limits shared cloud IPs (e.g. Vercel) with a 'temporarily disabled'
     # 403 after a couple of calls. That window is short, so retry once after a brief
@@ -2227,14 +2228,11 @@ class handler(BaseHTTPRequestHandler):
             out["resolve_state"] = astate
         except Exception as e:
             out["resolve_exception"] = f"{type(e).__name__}: {e}"
-        # unauthenticated stats (cloud IP -> 403) vs authenticated via get_stats (token)
+        # stats via get_stats (now authenticated by default through _gql -> ANILIST_TOKEN)
         try:
-            unauth = _gql("query($n:String){User(name:$n){statistics{anime{count}}}}", {"n": "Koros1Sama"})
-            out["unauth_stats_ok"] = bool(sget(unauth, "data", "User", "statistics"))
-            out["unauth_stats_err_status"] = str((unauth.get("errors") or [{}])[0].get("status", ""))
-            out["auth_stats_ok"] = bool(get_stats("Koros1Sama"))  # uses token=ANILIST_TOKEN
+            out["stats_ok"] = bool(get_stats("Koros1Sama"))
         except Exception as e:
-            out["stats_diag_exception"] = f"{type(e).__name__}: {e}"
+            out["stats_exception"] = f"{type(e).__name__}: {e}"
         out["elapsed_seconds"] = round(time.time() - t0, 2)
         return out
 
