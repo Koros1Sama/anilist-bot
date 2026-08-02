@@ -2196,6 +2196,9 @@ class handler(BaseHTTPRequestHandler):
     # ---------- HTTP entry ----------
     def do_GET(self):
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if qs.get("diag"):
+            self._json(200, self._diag())
+            return
         if qs.get("test"):
             self._json(200, self._test_agent())
             return
@@ -2220,6 +2223,28 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+    def _diag(self):
+        """Probe AniList from the bot's own server (Vercel) to see what it actually gets."""
+        t0 = time.time()
+        out = {
+            "anilist_token": "SET" if ANILIST_TOKEN else "MISSING",
+            "note": "probes AniList from the bot's server (Vercel), not your device",
+        }
+        try:
+            res = _gql("query{Viewer{id name}}", token=ANILIST_TOKEN)
+            out["probe_errors"] = res.get("errors")
+            out["probe_viewer"] = sget(res, "data", "Viewer")
+            out["looks_disabled_to_bot"] = bool(_looks_disabled(_gql_errors(res)))
+        except Exception as e:
+            out["probe_exception"] = f"{type(e).__name__}: {e}"
+        try:
+            _me, astate = _resolve_me_and_state()
+            out["resolve_state"] = astate
+        except Exception as e:
+            out["resolve_exception"] = f"{type(e).__name__}: {e}"
+        out["elapsed_seconds"] = round(time.time() - t0, 2)
+        return out
 
     def _test_agent(self):
         if not GEMINI_KEY:
