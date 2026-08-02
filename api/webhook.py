@@ -1142,25 +1142,12 @@ def _gql_errors(res):
 
 
 def _looks_disabled(err):
-    """Heuristic: does this error string indicate AniList is globally down/403?"""
+    """True ONLY for AniList's genuine global-disable message.
+    Do NOT match rate-limits (429) or transient 503s — those are 'retry', not 'down'."""
     if not err:
         return False
     e = err.lower()
-    if "not found" in e:
-        return False
-    return any(
-        k in e
-        for k in (
-            "403",
-            "temporarily disabled",
-            "severe stability",
-            "rate limit",
-            "429",
-            "503",
-            "service unavailable",
-            "overload",
-        )
-    )
+    return "temporarily disabled" in e or "severe stability" in e
 
 
 def _viewer_me():
