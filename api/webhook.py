@@ -321,11 +321,11 @@ def get_viewer(token):
     return sget(res, "data", "Viewer")
 
 
-def get_activities(user_id, page=1, per_page=8):
+def get_activities(user_id, page=1, per_page=8, token=None):
     q = """query($u:Int,$p:Int,$n:Int){Page(page:$p,perPage:$n){
     activities(userId:$u,type:MEDIA_LIST,sort:ID_DESC){...on ListActivity{
     status progress createdAt media{id title{romaji english} coverImage{large} siteUrl}}}}}"""
-    res = _gql(q, {"u": user_id, "p": page, "n": per_page})
+    res = _gql(q, {"u": user_id, "p": page, "n": per_page}, token=token or ANILIST_TOKEN)
     return sget(res, "data", "Page", "activities", default=[]) or []
 
 
@@ -352,6 +352,7 @@ def get_media_list(
     sort=None,
     page=1,
     per_page=10,
+    token=None,
 ):
     q = """query($un:String,$uid:Int,$t:MediaType,$st:MediaListStatus,$so:[MediaListSort],$p:Int,$n:Int){
     Page(page:$p,perPage:$n){mediaList(userName:$un,userId:$uid,type:$t,status:$st,sort:$so){
@@ -366,7 +367,7 @@ def get_media_list(
         v["st"] = status
     if sort:
         v["so"] = sort
-    res = _gql(q, v)
+    res = _gql(q, v, token=token or ANILIST_TOKEN)
     return sget(res, "data", "Page", "mediaList", default=[]) or []
 
 
@@ -454,11 +455,11 @@ def current_season():
         return "FALL", y
 
 
-def get_following(user_id, page=1, per_page=10):
+def get_following(user_id, page=1, per_page=10, token=None):
     q = """query($u:Int,$p:Int,$n:Int){Page(page:$p,perPage:$n){
     following(userId:$u){id name avatar{large} siteUrl
     statistics{anime{count episodesWatched meanScore} manga{count chaptersRead}}}}}"""
-    res = _gql(q, {"u": user_id, "p": page, "n": per_page})
+    res = _gql(q, {"u": user_id, "p": page, "n": per_page}, token=token or ANILIST_TOKEN)
     return sget(res, "data", "Page", "following", default=[]) or []
 
 
@@ -1141,22 +1142,25 @@ def _gql_errors(res):
 
 
 def _looks_disabled(err):
-    """Heuristic: does this error string indicate AniList is temporarily down/403?"""
+    """Heuristic: does this error string indicate AniList is globally down/403?"""
     if not err:
         return False
     e = err.lower()
+    if "not found" in e:
+        return False
     return any(
         k in e
         for k in (
             "403",
-            "disabled",
-            "temporarily",
-            "rate",
+            "temporarily disabled",
+            "severe stability",
+            "rate limit",
+            "429",
+            "503",
+            "service unavailable",
             "overload",
-            "unavailable",
-            "5",
         )
-    ) and "not found" not in e
+    )
 
 
 def _viewer_me():
@@ -1166,6 +1170,19 @@ def _viewer_me():
         return get_viewer(ANILIST_TOKEN)
     except Exception:
         return None
+
+
+def _resolve_me_and_state():
+    """One probe: returns (me_or_None, state) where state in {'ok','down','no_token','error'}.
+    Distinguishes a globally-disabled AniList (HTTP 403) from a missing token or other error,
+    so the agent can reply 'AniList متعطّلة' consistently instead of misleading 'not found'/'empty'."""
+    if not ANILIST_TOKEN:
+        return None, "no_token"
+    res = _gql("query{Viewer{id name}}", token=ANILIST_TOKEN)
+    err = _gql_errors(res)
+    if err:
+        return None, ("down" if _looks_disabled(err) else "error")
+    return sget(res, "data", "Viewer"), "ok"
 
 
 def _compact_media(m):
@@ -1212,6 +1229,7 @@ def _tool_search_my_list(cid, args, me):
             id status score progress media{id title{romaji english native} episodes chapters seasonYear
             averageScore coverImage{large} siteUrl}}}}""",
             {"un": me["name"], "t": mt, "p": pg, "n": 50},
+            token=ANILIST_TOKEN,
         )
         err = _gql_errors(res)
         if err:
@@ -2098,10 +2116,24 @@ def run_agent(cid, text):
     """Run the multi-step Gemini agent. Returns True if a reply was sent, False on failure (caller falls back)."""
     if not GEMINI_KEY:
         return False
-    me = _viewer_me()
+    me, astate = _resolve_me_and_state()
     contents = _build_contents(cid)
     if not contents:
         contents = [{"role": "user", "parts": [{"text": text}]}]
+    # If AniList is globally down, tell the agent up-front so it replies gracefully
+    # (consistently "AniList متعطّلة") instead of tools reporting misleading "not found"/"empty".
+    if astate == "down":
+        contents.append(
+            {
+                "role": "user",
+                "parts": [
+                    {
+                        "text": "[ملاحظة نظام: AniList API متعطّلة حالياً (HTTP 403). كل أدوات AniList ستفشل. لا تستدعِ أدوات — ردّ على المستخدم بأن AniList متعطّلة شوي ويجرّب بعد دقايق.]"
+                    }
+                ],
+            }
+        )
+        contents.append({"role": "model", "parts": [{"text": "تمام، AniList متعطّلة."}]})
 
     for _step in range(MAX_STEPS):
         resp = _gemini_generate(contents)

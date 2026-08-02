@@ -205,6 +205,23 @@ wb.GEMINI_KEY = ""
 ok3 = wb.run_agent("999", "x")
 check(ok3 is False, "run_agent returns False when GEMINI_KEY missing")
 
+print("\n=== [E] OUTAGE INJECTION (AniList down -> agent told up-front, replies gracefully) ===")
+sent.clear()
+wb.GEMINI_KEY = "dummy-key"
+wb.ANILIST_TOKEN = "dummy"  # so _resolve_me_and_state proceeds to the probe
+wb._resolve_me_and_state = lambda: (None, "down")
+injected = {"v": False}
+def fake_gen_down(contents):
+    blob = json.dumps(contents, ensure_ascii=False)
+    if "AniList API متعطّلة" in blob:
+        injected["v"] = True
+    return {"candidates": [{"content": {"parts": [{"text": "AniList متعطّلة شوي، جرّب بعد دقايق 🙏"}]}}]}
+wb._gemini_generate = fake_gen_down
+ok = wb.run_agent("777", "هات قائمة اصدقائي")
+check(ok is True, "run_agent returned True during outage (reply sent)")
+check(injected["v"], "outage note injected into Gemini contents (agent told AniList is down)")
+check(any("متعطّلة" in t[1] for t in sent), "agent replied with the graceful outage message")
+
 print("\n" + ("=" * 50))
 if failures:
     print(f"{len(failures)} CHECK(S) FAILED:")
