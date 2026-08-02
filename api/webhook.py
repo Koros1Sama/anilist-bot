@@ -2230,6 +2230,13 @@ class handler(BaseHTTPRequestHandler):
             out["resolve_state"] = astate
         except Exception as e:
             out["resolve_exception"] = f"{type(e).__name__}: {e}"
+        # test the EXACT stats query that failed for the user (from the bot's server)
+        try:
+            sres = _gql("query($n:String){User(name:$n){id statistics{anime{count meanScore minutesWatched episodesWatched genres(limit:5,sort:COUNT_DESC){genre} studios(limit:3,sort:COUNT_DESC){studio{name}}} manga{count meanScore chaptersRead}}}}", {"n": "Koros1Sama"})
+            out["stats_query_errors"] = sres.get("errors")
+            out["stats_present"] = bool(sget(sres, "data", "User", "statistics"))
+        except Exception as e:
+            out["stats_exception"] = f"{type(e).__name__}: {e}"
         out["elapsed_seconds"] = round(time.time() - t0, 2)
         return out
 
