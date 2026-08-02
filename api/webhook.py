@@ -2230,13 +2230,20 @@ class handler(BaseHTTPRequestHandler):
             out["resolve_state"] = astate
         except Exception as e:
             out["resolve_exception"] = f"{type(e).__name__}: {e}"
-        # test the EXACT stats query that failed for the user (from the bot's server)
+        # diagnostic variants for the failing statistics query (heavy vs light + retry)
         try:
-            sres = _gql("query($n:String){User(name:$n){id statistics{anime{count meanScore minutesWatched episodesWatched genres(limit:5,sort:COUNT_DESC){genre} studios(limit:3,sort:COUNT_DESC){studio{name}}} manga{count meanScore chaptersRead}}}}", {"n": "Koros1Sama"})
-            out["stats_query_errors"] = sres.get("errors")
-            out["stats_present"] = bool(sget(sres, "data", "User", "statistics"))
+            full_q = "query($n:String){User(name:$n){statistics{anime{count meanScore minutesWatched episodesWatched genres(limit:5,sort:COUNT_DESC){genre} studios(limit:3,sort:COUNT_DESC){studio{name}}} manga{count}}}}"
+            light_q = "query($n:String){User(name:$n){statistics{anime{count meanScore minutesWatched episodesWatched} manga{count chaptersRead}}}}"
+            results = []
+            for _i in range(3):
+                r = _gql(full_q, {"n": "Koros1Sama"})
+                results.append("ok" if sget(r, "data", "User", "statistics") else str((r.get("errors") or [{}])[0].get("status", "err")))
+            out["full_stats_3x"] = results
+            lr = _gql(light_q, {"n": "Koros1Sama"})
+            out["light_stats_ok"] = bool(sget(lr, "data", "User", "statistics"))
+            out["light_stats_err"] = lr.get("errors")
         except Exception as e:
-            out["stats_exception"] = f"{type(e).__name__}: {e}"
+            out["stats_variants_exception"] = f"{type(e).__name__}: {e}"
         out["elapsed_seconds"] = round(time.time() - t0, 2)
         return out
 
