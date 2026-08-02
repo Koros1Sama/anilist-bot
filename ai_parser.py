@@ -16,6 +16,8 @@ ARABIC_ANIME_DICTIONARY = {
     "ديمون سلاير": "Demon Slayer",
     "رجل المنشار": "Chainsaw Man",
     "تشينسو مان": "Chainsaw Man",
+    "راجنا": "Ragna Crimson",
+    "راغنا": "Ragna Crimson",
     "هنتر": "Hunter x Hunter",
     "القناص": "Hunter x Hunter",
     "هنتر هانتر": "Hunter x Hunter",
@@ -59,11 +61,15 @@ def parse_user_prompt(text: str) -> dict:
         "score": None,
         "progress_delta": None,
         "absolute_progress": None,
+        "is_favorite": False,
         "genre": None,
         "original_text": text
     }
 
     lower_text = text_clean.lower()
+
+    if any(k in lower_text for k in ["مفضلة", "مفضلتي", "افضل انمي", "favorite", "favourite"]):
+        result["is_favorite"] = True
 
     if any(k in lower_text for k in ["اقترح", "اقتراح", "ترشيح", "رشح", "أنمي حلو", "انمي ممتاز"]):
         result["action"] = "RECOMMEND"
@@ -86,7 +92,7 @@ def parse_user_prompt(text: str) -> dict:
     if any(k in lower_text for k in ["مانجا", "مانها", "مانهوا", "فصل", "فصول", "شابتر", "chapter", "read"]):
         result["media_type"] = "MANGA"
 
-    score_match = re.search(r'(?:تقييم|قيمته|تقييمي|score)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/10|من 10)?', text_clean, re.IGNORECASE)
+    score_match = re.search(r'(?:تقييم|قيمته|تقييمي|اقيمه|أقيمه|score)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:/10|من 10)?', text_clean, re.IGNORECASE)
     if score_match:
         try:
             val = float(score_match.group(1))
@@ -124,8 +130,9 @@ def parse_user_prompt(text: str) -> dict:
         result["absolute_progress"] = int(abs_match.group(1))
 
     cleaned_title = text_clean
-    cleaned_title = re.sub(r'(?:و\s*)?(?:تقييم|قيمته|تقييمي|score)?\s*[0-9]+(?:\.[0-9]+)?\s*(?:/10|من 10)?', '', cleaned_title, flags=re.IGNORECASE)
+    cleaned_title = re.sub(r'(?:و\s*)?(?:واريد\s*)?(?:تقييم|قيمته|تقييمي|اقيمه|أقيمه|score)?\s*[0-9]+(?:\.[0-9]+)?\s*(?:/10|من 10)?', '', cleaned_title, flags=re.IGNORECASE)
     cleaned_title = re.sub(r'(?:للحلقة|حلقة|حلقات|حلقتين|فصل|فصول|شابتر|eps|chapters)\s*\d*', '', cleaned_title, flags=re.IGNORECASE)
+    cleaned_title = re.sub(r'(?:و\s*)?(?:اعمله|إعمله|اجعله|أجعله)?\s*(?:مفضلة|مفضلتي|favorite)?', '', cleaned_title, flags=re.IGNORECASE)
 
     prefix_patterns = [
         r'^\s*شفت\s+من', r'^\s*شفت', r'^\s*تابعت', r'^\s*شاهدت', r'^\s*قريت', r'^\s*قرأت',

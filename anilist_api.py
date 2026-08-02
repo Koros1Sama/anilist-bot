@@ -126,6 +126,21 @@ def save_user_media_entry(media_id: int, access_token: str, status: str = None, 
         raise Exception(f"AniList API Error: {res['errors']}")
     return res.get("data", {}).get("SaveMediaListEntry")
 
+def toggle_favourite_anime(media_id: int, access_token: str):
+    mutation = """
+    mutation ($animeId: Int) {
+      ToggleFavourite (animeId: $animeId) {
+        anime {
+          nodes {
+            id
+          }
+        }
+      }
+    }
+    """
+    res = make_graphql_request(mutation, {"animeId": media_id}, access_token=access_token)
+    return res
+
 def search_character(name: str) -> dict:
     query = """
     query ($search: String) {

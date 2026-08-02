@@ -20,6 +20,7 @@ Extract and return ONLY a JSON object with keys:
 - "score": (number or null) user score out of 10
 - "progress_delta": (integer or null) episode/chapter count added (e.g. +2)
 - "absolute_progress": (integer or null) absolute episode/chapter number (e.g. 15)
+- "is_favorite": (boolean) true if user wants to set as favorite (e.g. 'اعمله مفضلة')
 - "genre": (string or null) e.g. 'Action', 'Comedy', 'Mystery', 'Romance', 'Psychological'
 - "confidence": (string) 'high' if confident, 'medium' or 'low' if ambiguous
 - "alternatives": (list of strings) alternative matching titles or seasons if ambiguous

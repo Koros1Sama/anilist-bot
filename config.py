@@ -10,9 +10,9 @@ def load_env_file():
                     key, val = line.split("=", 1)
                     os.environ[key.strip()] = val.strip()
 
+# Auto-load on import
 load_env_file()
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ANILIST_ACCESS_TOKEN = os.environ.get("ANILIST_ACCESS_TOKEN")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
