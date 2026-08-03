@@ -2066,7 +2066,7 @@ def dispatch_tool(cid, name, args, me):
 def _gemini_generate(contents):
     """Call Gemini generateContent with tools. Returns parsed JSON or None on total failure."""
     models = []
-    for m in [GEMINI_MODEL, "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]:
+    for m in ["gemini-3.5-flash", "gemini-3.6-flash", GEMINI_MODEL, "gemini-2.0-flash"]:
         if m and m not in models:
             models.append(m)
     payload = {
@@ -2206,6 +2206,9 @@ class handler(BaseHTTPRequestHandler):
         if qs.get("modeltest"):
             self._json(200, self._model_test())
             return
+        if qs.get("agenttest"):
+            self._json(200, self._agent_test())
+            return
         if qs.get("test"):
             self._json(200, self._test_agent())
             return
@@ -2230,6 +2233,28 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+    def _agent_test(self):
+        """Test the agent's tool-calling decisions on tricky sample messages (no Telegram side-effects)."""
+        samples = [
+            "هذا صديق متابعني ومتابعه مالك مدوخ",
+            "اصدقائي",
+            "وش الترند؟",
+            "ابحث عن مستخدم laseel",
+        ]
+        out = {}
+        for msg in samples:
+            contents = [{"role": "user", "parts": [{"text": msg}]}]
+            resp = _gemini_generate(contents)
+            if resp is None:
+                out[msg] = "GEMINI_FAILED"
+                continue
+            parts = sget(resp, "candidates", 0, "content", "parts", default=[]) or []
+            calls = [p["functionCall"]["name"] for p in parts if "functionCall" in p]
+            text = "".join(p.get("text", "") for p in parts if "text" in p).strip()[:100]
+            out[msg] = ("TOOLS: " + ", ".join(calls)) if calls else ("TEXT: " + text)
+        out["_model_used"] = _RUNTIME.get("last_model")
+        return out
 
     def _model_test(self):
         """Try generateContent WITH the real tools against candidate models; report which work."""
