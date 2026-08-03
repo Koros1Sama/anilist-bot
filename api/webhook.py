@@ -1150,6 +1150,7 @@ AGENT_SYSTEM_PROMPT = """أنت «المخلافي»، مساعد AniList لأن
 
 MAX_STEPS = 8
 GEMINI_TIMEOUT = 8
+_RUNTIME = {"last_model": None}
 
 
 def _gql_errors(res):
@@ -2086,6 +2087,7 @@ def _gemini_generate(contents):
         )
         try:
             with urllib.request.urlopen(req, timeout=GEMINI_TIMEOUT) as resp:
+                _RUNTIME["last_model"] = model
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             try:
@@ -2273,7 +2275,8 @@ class handler(BaseHTTPRequestHandler):
                 )[:60]
             return {
                 "agent_works": ok,
-                "model": GEMINI_MODEL,
+                "model_configured": GEMINI_MODEL,
+                "model_used": _RUNTIME.get("last_model"),
                 "tools": len(GEMINI_TOOLS),
                 "sample_reply": txt,
                 "elapsed_seconds": round(time.time() - t0, 2),
