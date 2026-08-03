@@ -2069,7 +2069,7 @@ def dispatch_tool(cid, name, args, me):
 def _gemini_generate(contents):
     """Call Gemini generateContent with tools. Returns parsed JSON or None on total failure."""
     models = []
-    for m in ["gemini-3.5-flash", "gemini-3.6-flash", "gemini-flash-latest", GEMINI_MODEL, "gemini-2.0-flash"]:
+    for m in ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest", GEMINI_MODEL, "gemini-2.0-flash"]:
         if m and m not in models:
             models.append(m)
     payload = {
