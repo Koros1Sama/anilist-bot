@@ -2250,25 +2250,35 @@ class handler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
     def _agent_test(self):
-        """Test the agent's tool-calling decisions on tricky sample messages (no Telegram side-effects)."""
-        samples = [
-            "هذا صديق متابعني ومتابعه مالك مدوخ",
-            "اصدقائي",
-            "وش الترند؟",
-            "ابحث عن مستخدم laseel",
-        ]
+        """Compare candidate models' tool-decisions on tricky sample messages."""
+        models = ["gemini-3.5-flash", "gemini-3.6-flash"]
+        samples = ["هذا صديق متابعني ومتابعه مالك مدوخ", "وش الترند؟", "اصدقائي", "احذف الكابتن تسوباسا"]
         out = {}
-        for msg in samples:
-            contents = [{"role": "user", "parts": [{"text": msg}]}]
-            resp = _gemini_generate(contents)
-            if resp is None:
-                out[msg] = "GEMINI_FAILED"
-                continue
-            parts = sget(resp, "candidates", 0, "content", "parts", default=[]) or []
-            calls = [p["functionCall"]["name"] for p in parts if "functionCall" in p]
-            text = "".join(p.get("text", "") for p in parts if "text" in p).strip()[:100]
-            out[msg] = ("TOOLS: " + ", ".join(calls)) if calls else ("TEXT: " + text)
-        out["_model_used"] = _RUNTIME.get("last_model")
+        for model in models:
+            out[model] = {}
+            for msg in samples:
+                payload = {
+                    "contents": [{"role": "user", "parts": [{"text": msg}]}],
+                    "tools": [{"functionDeclarations": GEMINI_TOOLS}],
+                    "systemInstruction": {"parts": [{"text": AGENT_SYSTEM_PROMPT}]},
+                    "generationConfig": {"temperature": 0.2},
+                }
+                data = json.dumps(payload).encode("utf-8")
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
+                req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+                try:
+                    with urllib.request.urlopen(req, timeout=GEMINI_TIMEOUT) as resp:
+                        res = json.loads(resp.read().decode("utf-8"))
+                    cand = (res.get("candidates") or [{}])[0]
+                    parts = sget(cand, "content", "parts", default=[]) or []
+                    calls = [p["functionCall"]["name"] for p in parts if "functionCall" in p]
+                    text = "".join(p.get("text", "") for p in parts if "text" in p).strip()[:80]
+                    finish = cand.get("finishReason", "")
+                    out[model][msg] = (("TOOLS:" + ",".join(calls)) if calls else ("TEXT:" + text)) + f" [{finish}]"
+                except urllib.error.HTTPError as e:
+                    out[model][msg] = f"HTTP {e.code}"
+                except Exception as e:
+                    out[model][msg] = f"{type(e).__name__}"
         return out
 
     def _model_test(self):
