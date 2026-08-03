@@ -2250,9 +2250,15 @@ class handler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
 
     def _agent_test(self):
-        """Compare candidate models' tool-decisions on tricky sample messages."""
-        models = ["gemini-3.5-flash", "gemini-3.6-flash"]
-        samples = ["هذا صديق متابعني ومتابعه مالك مدوخ", "وش الترند؟", "اصدقائي", "احذف الكابتن تسوباسا"]
+        """Compare candidate models' tool-decisions on the owner's REAL problematic messages."""
+        models = ["gemini-3.6-flash", "gemini-3.5-flash"]
+        samples = [
+            "كيف حالك؟",
+            "شفت حلقتين من الانمي ذاك الي عنده قط الي يعطيه اختراعات وهو جاي من المستقبل",
+            "شفت حلقة من انمي القط الاسود",
+            "ملف صاحب اليوزر laseel",
+            "احصائياتي",
+        ]
         out = {}
         for model in models:
             out[model] = {}
@@ -2271,10 +2277,9 @@ class handler(BaseHTTPRequestHandler):
                         res = json.loads(resp.read().decode("utf-8"))
                     cand = (res.get("candidates") or [{}])[0]
                     parts = sget(cand, "content", "parts", default=[]) or []
-                    calls = [p["functionCall"]["name"] for p in parts if "functionCall" in p]
-                    text = "".join(p.get("text", "") for p in parts if "text" in p).strip()[:80]
-                    finish = cand.get("finishReason", "")
-                    out[model][msg] = (("TOOLS:" + ",".join(calls)) if calls else ("TEXT:" + text)) + f" [{finish}]"
+                    calls = [(p["functionCall"].get("name"), p["functionCall"].get("args")) for p in parts if "functionCall" in p]
+                    text = "".join(p.get("text", "") for p in parts if "text" in p).strip()[:90]
+                    out[model][msg] = ("TOOLS " + json.dumps(calls, ensure_ascii=False)) if calls else ("TEXT " + text)
                 except urllib.error.HTTPError as e:
                     out[model][msg] = f"HTTP {e.code}"
                 except Exception as e:
