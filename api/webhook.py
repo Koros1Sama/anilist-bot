@@ -2203,6 +2203,9 @@ class handler(BaseHTTPRequestHandler):
         if qs.get("models"):
             self._json(200, self._list_models())
             return
+        if qs.get("modeltest"):
+            self._json(200, self._model_test())
+            return
         if qs.get("test"):
             self._json(200, self._test_agent())
             return
@@ -2227,6 +2230,34 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+    def _model_test(self):
+        """Try generateContent WITH the real tools against candidate models; report which work."""
+        candidates = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.5-flash", GEMINI_MODEL, "gemini-2.0-flash"]
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": "ردّ بكلمة واحدة: جاهز"}]}],
+            "tools": [{"functionDeclarations": GEMINI_TOOLS}],
+            "systemInstruction": {"parts": [{"text": "رد مختصر"}]},
+            "generationConfig": {"temperature": 0.2},
+        }
+        data = json.dumps(payload).encode("utf-8")
+        out = {}
+        for model in dict.fromkeys([c for c in candidates if c]):
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
+            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=GEMINI_TIMEOUT) as resp:
+                    res = json.loads(resp.read().decode("utf-8"))
+                out[model] = "ok" if res.get("candidates") else "no-candidates"
+            except urllib.error.HTTPError as e:
+                try:
+                    msg = e.read().decode("utf-8")[:140]
+                except Exception:
+                    msg = str(e.code)
+                out[model] = f"HTTP {e.code}: {msg}"
+            except Exception as e:
+                out[model] = f"{type(e).__name__}: {e}"
+        return out
 
     def _list_models(self):
         """List Gemini models available to this key (to pick the best for function-calling)."""
