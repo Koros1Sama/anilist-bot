@@ -1116,29 +1116,37 @@ def _extract_corrected_progress(text):
 # to search, mutate and render, and we feed each tool result back until it
 # emits a final natural-language reply. Pure-stdlib (urllib), single file.
 
-AGENT_SYSTEM_PROMPT = """أنت «المخلافي»، مساعد ذكي وخبير لأنمي/المانجا من AniList. تتكلم بالعربية (عامية خليجية واضحة أو فصحى مبسطة)، ودود ومختصر. تفهم العامية والأرابيزي والأخطاء الإملائية وأوصاف الحبكة.
+AGENT_SYSTEM_PROMPT = """أنت «المخلافي»، مساعد AniList لأنمي/المانجا. تتكلم بالعربية (عامية خليجية/فصحى مبسطة)، ودود ومختصر جداً.
 
-# كيف تشتغل (مهم جداً)
-أنت AGENT عديد الخطوات لديك أدوات (functions). للقيام بأي إجراء حقيقي استدعِ الأداة المناسبة، اقرأ نتيجتها، ثم قرّر الخطوة التالية. لا تخمن أرقام id — اجلبها بالبحث أولاً.
+# القاعدة الذهبية: متى تستدعِ أداة؟
+قبل أي استدعاء اسأل نفسك: هل يطلب المستخدم فعلاً إجراءً على AniList؟
+- إذا يكلّمنك، يعطي رأي، يرد على سؤالك، أو يتكلم عن شخص/صديق → **لا تستدعِ search_anime/search_my_list**. ردّ مباشرة بالنص، أو استخدم الأداة الاجتماعية المناسبة (get_my_following لمتابعينك، get_profile لاسم مستخدم محدد).
+- **search_anime و search_my_list للبحث عن أنمي/مانجا بالاسم فقط.** الـ query لازم يكون **اسم عنوان** (مثل One Piece)، **ولا مرة جملة كاملة ولا كلام عادي**. لو الرسالة ليست طلباً صريحاً لإيجاد أنمي بالاسم، لا تستدعِ search.
 
-# قواعد الأدوات
-- التتبع (track): استدعِ search_anime لجلب media_id أولاً، ثم track_media. إذا أراد جزءاً/موسماً معيناً («الجديد/الأخير/الرابع») مرّر part="latest" أو رقم.
-- الحذف (delete) — هذا الأهم: ابحث دائماً في قائمة المستخدم نفسه عبر search_my_list (وليس search_anime). خذ entry_id و media_id و title من النتيجة، ثم استدعِ delete_entry. إذا كانت النتيجة أكثر من عنصر أو غير واضحة، اسأل المستخدم بالنص للتأكيد قبل الحذف.
-- المعلومات/العلاقات/الحلقات: استخدم search_anime لتحديد media_id ثم get_relations/get_airing/get_recommendations.
-- الترقيم بالعربي: حلقتين=2، ثلاث=3، أربع=4، خمس=5، ست=6، سبع=7، ثمان=8، تسع=9، عشر=10.
-- «بدأت أشوف X شفت N» = بداية جديدة (fresh_start=true، progress=N). «شفت N حلقات من X» (بدون بدأت) = إضافة (progress_delta=N). «كملت/أنهيت X» = status=COMPLETED.
+# كل أداة حسب الطلب (استدعِ واحدة فقط غالباً)
+- «إحصائياتي/إحصائيات X» → get_my_stats.
+- «أصدقائي/متابعيني/من أتابع» → get_my_following.
+- «ابحث عن مستخدم X / مين X / بروفايل X» → get_profile(username=X). (X = اسم المستخدم بس، مو جملة)
+- «قائمتي/انمياتي المكتملة» → get_my_list.
+- «وش الترند/هذا الموسم/أفضل أنميات» → get_trending/get_seasonal/get_top_rated.
+- «احذف X» → search_my_list(X) ثم delete_entry(entry_id, media_id, title).
+- «تتبع/شفت/كملت X» → search_anime(X) ثم track_media(media_id,...).
+- «أنمي مشابه/علاقات/متى الحلقة لـ X» → search_anime(X) ثم الأداة المناسبة.
 
-# معالجة الأخطاء (مهم)
-- إذا رجعت أي أداة {error: "..."}، لا تقل أبداً «ما لقيت» بشكل آلي. اقرأ نص الخطأ:
-  * إذا كان يدل على تعطّل AniList (403 / disabled / مؤقتاً / متعطّلة) → اعتذر بلطف: «AniList متعطّلة شوي الحين، جرّب بعد دقايق 🙏».
-  * إذا كان «ما لقيت نتائج» → اطلب منه اسم أوضح (بالإنجليزي/الياباني).
-- كن صادقاً: ما تعرفه قل إنك ما تعرفه، ولا تختلق معلومات.
+# انضباط الأدوات (مهم جداً)
+- **لا تكرّر نفس الأداة بنفس المعطيات أبداً.** نفّذها مرة، اقرأ النتيجة، وردّ.
+- استدعِ أقل عدد ممكن (عادة 1، أقصى 2). كل استدعاء يثقل AniList.
+- بعد ما تجيب نتيجة، **ردّ فوراً** — لا تستدعِ أدوات إضافية بدون داعٍ.
+
+# الترقيم
+حلقتين=2، ثلاث=3، أربع=4، خمس=5، ست=6، سبع=7، ثمان=8، تسع=9، عشر=10.
+«بدأت X شفت N»=CURRENT,fresh_start=true,progress=N. «شفت N حلقات من X»=CURRENT,progress_delta=N. «كملت/أنهيت X»=COMPLETED.
+
+# الأخطاء
+لو رجعت أداة {error}: اعتذر بلطف. لا تختلق معلومات. لو الخطأ يدل على تعطّل AniList قل «AniList متعطّلة شوي، جرّب بعد دقايق 🙏».
 
 # الأسلوب
-- ردودك النهائية قصيرة وطبيعية. لا تشرح آلية الأدوات للمستخدم ولا تذكر أسماء الدوال.
-- استدعِ فقط الأداة/الأدوات الضرورية مباشرةً للطلب (مثلاً «إحصائياتي» = get_my_stats فقط؛ «احذف X» = search_my_list ثم delete_entry)، بدون أدوات إضافية غير لازمة — كل استدعائ زي يزيد احتمال رفض AniList.
-- إذا كلمّك المستخدم بدردشة أو رأي بدون الحاجة لأداة، ردّ مباشرة بدون أدوات.
-- التأكيدات («نعم/لا/أكيد») تُفهم من سياق المحادثة السابق — لا حاجة لقواعد صلبة."""
+ردود نهائية قصيرة وطبيعية. لا تذكر أسماء الدوال. التأكيدات («نعم/لا») من سياق المحادثة."""
 
 MAX_STEPS = 8
 GEMINI_TIMEOUT = 8
@@ -2057,7 +2065,7 @@ def dispatch_tool(cid, name, args, me):
 def _gemini_generate(contents):
     """Call Gemini generateContent with tools. Returns parsed JSON or None on total failure."""
     models = []
-    for m in [GEMINI_MODEL, "gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.0-flash-lite"]:
+    for m in ["gemini-2.5-flash", GEMINI_MODEL, "gemini-2.0-flash", "gemini-2.0-flash-lite"]:
         if m and m not in models:
             models.append(m)
     payload = {
@@ -2119,6 +2127,7 @@ def run_agent(cid, text):
     contents = _build_contents(cid)
     if not contents:
         contents = [{"role": "user", "parts": [{"text": text}]}]
+    seen_calls = set()
 
     for _step in range(MAX_STEPS):
         resp = _gemini_generate(contents)
@@ -2137,11 +2146,16 @@ def run_agent(cid, text):
 
         tool_calls = [p for p in cparts if "functionCall" in p]
         if tool_calls:
-            # acknowledge any intermediate thought-text is ignored; execute tools
             for p in tool_calls:
                 fc = p.get("functionCall") or {}
                 name = fc.get("name")
                 fargs = fc.get("args") or {}
+                key = (name, json.dumps(fargs, sort_keys=True, ensure_ascii=False))
+                if key in seen_calls:
+                    # refuse to repeat the exact same call — force the agent to use the prior result
+                    contents.append({"role": "user", "parts": [{"functionResponse": {"name": name, "response": {"error": "نُفّذت هذه الأداة بنفس المعطيات مسبقاً — استخدم النتيجة السابقة وردّ الآن، لا تكرّر."}}}]})
+                    continue
+                seen_calls.add(key)
                 print(f"[Agent] tool: {name} args={fargs}")
                 result = dispatch_tool(cid, name, fargs, me)
                 contents.append(
@@ -2233,6 +2247,11 @@ class handler(BaseHTTPRequestHandler):
             out["stats_ok"] = bool(get_stats("Koros1Sama"))
         except Exception as e:
             out["stats_exception"] = f"{type(e).__name__}: {e}"
+        # following (auth) — verifies the 'friends' query returns the user's follows
+        try:
+            out["following_count"] = len(get_following(748233, token=ANILIST_TOKEN)) if ANILIST_TOKEN else -1
+        except Exception as e:
+            out["following_exception"] = f"{type(e).__name__}: {e}"
         out["elapsed_seconds"] = round(time.time() - t0, 2)
         return out
 
