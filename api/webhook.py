@@ -54,6 +54,9 @@ _load_local_env()
 # [1] CONFIG
 # ============================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+# Private bot — restrict usage to the owner only (override via env if needed).
+ALLOWED_TG_USERNAME = (os.environ.get("ALLOWED_TELEGRAM_USERNAME") or "KorosSama").lower().lstrip("@")
+ALLOWED_TG_ID = str(os.environ.get("ALLOWED_TELEGRAM_ID") or "803065257")  # @KorosSama
 ANILIST_TOKEN = os.environ.get("ANILIST_ACCESS_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
@@ -2187,6 +2190,18 @@ def run_agent(cid, text):
     tg_send(cid, "⏳ تعذّر إكمال الطلب الآن، جرّب بصيغة أبسط أو /help.")
     return True
 
+def _sender_allowed(update):
+    """Private bot: only the configured owner (@KorosSama) may use it."""
+    frm = update.get("from") or {}
+    uname = (frm.get("username") or "").lower().lstrip("@")
+    uid = str(frm.get("id") or "")
+    if uname and uname == ALLOWED_TG_USERNAME:
+        return True
+    if uid and uid == ALLOWED_TG_ID:
+        return True
+    return False
+
+
 # ============================================================
 # [9] HANDLER CLASS (v4.0 — agent-driven)
 # ============================================================
@@ -2383,6 +2398,8 @@ class handler(BaseHTTPRequestHandler):
 
     # ---------- Message dispatch ----------
     def _on_message(self, msg):
+        if not _sender_allowed(msg):
+            return  # private bot — owner only
         chat_id = sget(msg, "chat", "id")
         text = (msg.get("text") or "").strip()
         if not text or not chat_id:
@@ -2524,6 +2541,8 @@ class handler(BaseHTTPRequestHandler):
 
     # ---------- Callbacks (v4 mostly uses URL links; legacy-safe stub) ----------
     def _on_callback(self, cb):
+        if not _sender_allowed(cb):
+            return  # private bot — owner only
         cbid = cb.get("id")
         cid = str(sget(cb, "message", "chat", "id") or "")
         mid = sget(cb, "message", "message_id")
