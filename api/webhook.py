@@ -2066,7 +2066,7 @@ def dispatch_tool(cid, name, args, me):
 def _gemini_generate(contents):
     """Call Gemini generateContent with tools. Returns parsed JSON or None on total failure."""
     models = []
-    for m in ["gemini-2.5-flash", GEMINI_MODEL, "gemini-2.0-flash", "gemini-2.0-flash-lite"]:
+    for m in [GEMINI_MODEL, "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite"]:
         if m and m not in models:
             models.append(m)
     payload = {
@@ -2200,6 +2200,9 @@ class handler(BaseHTTPRequestHandler):
         if qs.get("diag"):
             self._json(200, self._diag())
             return
+        if qs.get("models"):
+            self._json(200, self._list_models())
+            return
         if qs.get("test"):
             self._json(200, self._test_agent())
             return
@@ -2224,6 +2227,18 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+    def _list_models(self):
+        """List Gemini models available to this key (to pick the best for function-calling)."""
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_KEY}&pageSize=200"
+            req = urllib.request.Request(url, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=GEMINI_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            supported = [m for m in (data.get("models") or []) if "generateContent" in (m.get("supportedGenerationMethods") or [])]
+            return {"count": len(supported), "models": [m.get("name", "").replace("models/", "") for m in supported]}
+        except Exception as e:
+            return {"error": f"{type(e).__name__}: {e}"}
 
     def _diag(self):
         """Probe AniList from the bot's own server (Vercel) to see what it actually gets."""
