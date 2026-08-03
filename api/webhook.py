@@ -1724,6 +1724,19 @@ def _tool_get_my_stats(cid, args, me):
         f"  • متوسط التقييم: {m.get('meanScore', 0)}/100"
     )
     tg_send(cid, cap)
+    # also show recent activity images (the owner liked this richer view)
+    try:
+        acts = get_activities(me["id"]) if me else []
+        items = []
+        for act in acts[:5]:
+            media = act.get("media") or {}
+            url = cover_of(media)
+            if url:
+                items.append({"url": url, "caption": f"<b>{title_of(media)}</b>"})
+        if items:
+            tg_album(cid, items)
+    except Exception:
+        pass
     return {"ok": True}
 
 
